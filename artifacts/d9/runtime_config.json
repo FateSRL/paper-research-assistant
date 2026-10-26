@@ -1,0 +1,70 @@
+{
+  "schema_revision": "d9-runtime-policy-v1",
+  "task": "D9",
+  "stage": "d9",
+  "runtime_version": "d9-owned-two-mode-runtime-v1",
+  "chat": {
+    "provider": "deepseek",
+    "model_id": "deepseek-flash",
+    "base_url": "https://api.deepseek.com",
+    "configured_timeout_seconds": 30.0
+  },
+  "index_profile": {
+    "index_profile_id": "ep_cbf0f6caa97b962a",
+    "recipe_sha256": "cbf0f6caa97b962ad637a0b1a0a704a0eeb990d978247fd6e4bab78d4a4b2e3b",
+    "collection_name": "paper_chunks_ep_cbf0f6caa97b962a",
+    "recipe": {
+      "backend": "dashscope",
+      "model": "qwen3.7-text-embedding",
+      "dimension": 1024,
+      "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "input_mode": "openai-compatible-default",
+      "request_schema": "embeddings-input-array-v1",
+      "encoding_format": "float",
+      "preprocessing": "identity-text-v1",
+      "distance": "cosine"
+    }
+  },
+  "ready_versions": [
+    {
+      "import_key": "i_83e9dcf7bc188e40486b031794f3296744194ff45e80c515ada73669bfc66c62",
+      "paper_id": "arxiv_2005.11401v4",
+      "parse_revision": "r_269ac0cb1263292d",
+      "index_profile_id": "ep_cbf0f6caa97b962a",
+      "status": "ready",
+      "completed_count": 385,
+      "error_summary": null
+    },
+    {
+      "import_key": "i_9933c44b221e13318eaffb4c7c4f261fa5ed68cd287e787538c4dbc15f52c960",
+      "paper_id": "arxiv_2210.03629v3",
+      "parse_revision": "r_22af23d03fcb87a8",
+      "index_profile_id": "ep_cbf0f6caa97b962a",
+      "status": "ready",
+      "completed_count": 480,
+      "error_summary": null
+    },
+    {
+      "import_key": "i_058bc8edb9b62cb359d4de162e0e01b07c9cc6704cb87a33c0f66f31b7ec8e29",
+      "paper_id": "arxiv_2303.11366v4",
+      "parse_revision": "r_d7736b29a2d8b39e",
+      "index_profile_id": "ep_cbf0f6caa97b962a",
+      "status": "ready",
+      "completed_count": 323,
+      "error_summary": null
+    }
+  ],
+  "rules": {
+    "budget": {
+      "chat_policy": {
+        "temperature": 0.2,
+        "max_tokens": 1200,
+        "request_timeout": 30.0,
+        "max_attempts": 3,
+        "max_network_retries": 1,
+        "max_repairs": 1,
+        "total_timeout": 120.0
+      }
+    }
+  }
+}

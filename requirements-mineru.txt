@@ -1,0 +1,8 @@
+# Separate environment: MinerU 4 requires OpenAI <3; the application uses OpenAI 3.
+# Windows CUDA 12.8; install with .venv-mineru/Scripts/python.exe.
+--extra-index-url https://download.pytorch.org/whl/cu128
+mineru[full]==4.0.12
+torch==2.11.0+cu128
+torchvision==0.26.0+cu128
+transformers==5.10.1
+lmdeploy==0.17.0

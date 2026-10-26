@@ -1,0 +1,10 @@
+hello-agents==0.1.1
+pydantic==2.13.5
+python-dotenv==1.2.3
+httpx==0.28.1
+openai==3.19.2
+pymupdf==1.28.2
+fonttools==4.66.1
+qdrant-client==1.19.1
+streamlit==1.65.0
+tokenizers==0.23.3

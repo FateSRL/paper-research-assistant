@@ -1,0 +1,32 @@
+[
+  {
+    "paper_id": "arxiv_2005.11401v4",
+    "arxiv_version": "v4",
+    "title": "Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks",
+    "source_url": "https://arxiv.org/abs/2005.11401v4",
+    "local_path": "data/papers/2005.11401v4.pdf",
+    "pdf_sha256": "23e3249e9a1e75418d82efecab0ea8c4d033b89c93742f63208d47ce01f21233",
+    "page_count": 19,
+    "text_selectable": true
+  },
+  {
+    "paper_id": "arxiv_2210.03629v3",
+    "arxiv_version": "v3",
+    "title": "ReAct: Synergizing Reasoning and Acting in Language Models",
+    "source_url": "https://arxiv.org/abs/2210.03629v3",
+    "local_path": "data/papers/2210.03629v3.pdf",
+    "pdf_sha256": "f285b0971ae4a790e402fb93966bed3adde2cf0a04977d08b2b40d6ab0cace69",
+    "page_count": 33,
+    "text_selectable": true
+  },
+  {
+    "paper_id": "arxiv_2303.11366v4",
+    "arxiv_version": "v4",
+    "title": "Reflexion: Language Agents with Verbal Reinforcement Learning",
+    "source_url": "https://arxiv.org/abs/2303.11366v4",
+    "local_path": "data/papers/2303.11366v4.pdf",
+    "pdf_sha256": "6059b6f89fea9959bd3dab553fbb97756a3dfb1b15e3cbab2fbf3ab6664333bd",
+    "page_count": 19,
+    "text_selectable": true
+  }
+]

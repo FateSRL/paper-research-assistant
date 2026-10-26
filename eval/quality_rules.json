@@ -1,0 +1,71 @@
+{
+  "rules_revision": "d3-quality-rules-v1",
+  "coordinate_system": "PDF points, top-left origin, matching PyMuPDF page coordinates",
+  "region_rules": [
+    {
+      "paper_id": "arxiv_2005.11401v4",
+      "pdf_sha256": "23e3249e9a1e75418d82efecab0ea8c4d033b89c93742f63208d47ce01f21233",
+      "pdf_page": 3,
+      "region_id": "rag_sequence_display_equation",
+      "bbox": [
+        108,
+        258,
+        505,
+        293
+      ],
+      "reason": "math_symbols_and_layout_unreliable"
+    },
+    {
+      "paper_id": "arxiv_2005.11401v4",
+      "pdf_sha256": "23e3249e9a1e75418d82efecab0ea8c4d033b89c93742f63208d47ce01f21233",
+      "pdf_page": 3,
+      "region_id": "rag_token_display_equation",
+      "bbox": [
+        108,
+        360,
+        505,
+        396
+      ],
+      "reason": "math_symbols_and_layout_unreliable"
+    },
+    {
+      "paper_id": "arxiv_2005.11401v4",
+      "pdf_sha256": "23e3249e9a1e75418d82efecab0ea8c4d033b89c93742f63208d47ce01f21233",
+      "pdf_page": 3,
+      "region_id": "rag_dpr_display_equation",
+      "bbox": [
+        108,
+        473,
+        505,
+        490
+      ],
+      "reason": "math_symbols_and_layout_unreliable"
+    },
+    {
+      "paper_id": "arxiv_2210.03629v3",
+      "pdf_sha256": "f285b0971ae4a790e402fb93966bed3adde2cf0a04977d08b2b40d6ab0cace69",
+      "pdf_page": 2,
+      "region_id": "react_figure1_original_text",
+      "bbox": [
+        108,
+        80,
+        505,
+        408
+      ],
+      "reason": "original_figure_unicode_mapping_unreliable"
+    }
+  ],
+  "automatic_rules": {
+    "reject_line_with_non_layout_c0": true,
+    "reject_line_with_unicode_replacement": true,
+    "reject_identity_h_font_with_no_actual_unicode_mapping": true,
+    "reject_line_using_only_computer_modern_math_fonts": true
+  },
+  "notes": [
+    "Known bbox rules apply only to the exact paper version and PDF hash.",
+    "Reject whole affected lines and retain gaps; do not delete bad characters then concatenate.",
+    "Automatic screening is not full-page human review.",
+    "Recovered figure text is a separate derived artifact; it is not inserted into normal prose by this filter."
+  ]
+}
+

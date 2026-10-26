@@ -1,0 +1,29 @@
+# Local configuration and Python environment
+.env
+.env.*
+!.env.example
+.streamlit/secrets.toml
+.venv/
+.venv-mineru/
+data/models/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Local PDFs, indexes, and unredacted run data
+/data/
+/archive/
+/tmp/
+/eval/qasper/raw/
+/eval/qasper/pdfs/
+
+# Keep runtime contracts; generated reports and raw service responses stay local.
+/artifacts/*
+!/artifacts/d8/
+/artifacts/d8/*
+!/artifacts/d8/agent_config.json
+!/artifacts/d9/
+/artifacts/d9/*
+!/artifacts/d9/agent_config.json
+!/artifacts/d9/runtime_config.json
+!/artifacts/d9/source_regions.json

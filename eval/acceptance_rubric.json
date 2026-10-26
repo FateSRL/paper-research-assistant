@@ -1,0 +1,116 @@
+{
+  "revision": "d6-b-acceptance-evaluation-v1",
+  "created_on_client_date": "2026-10-04",
+  "dataset_scope": "held_out_acceptance_set",
+  "run_annotation_isolation": "Only question and selected paper/parse-version pairs enter the answering CLI. Expected points, evidence and answerability are used after the run.",
+  "machine_metrics": {
+    "retrieval_target_proxy": "Check each annotated quote after whitespace normalization in returned candidate text and separately in shown text, with exact paper/PDF hash/page identity. Record per-target and all-target case counts. This exact-target proxy is not semantic retrieval recall.",
+    "answerable_program_completion": "answered count over all attempted answerable cases. This is program completion, not semantic success. insufficient_evidence on an answerable case is unfinished and counted as program false refusal.",
+    "unanswerable_program_refusal": "insufficient_evidence count over all attempted unanswerable cases. Reason quality is reviewed separately.",
+    "citation_location_ratio": "Final valid published citation occurrences over final published citation occurrences. No published citations means N/A. Raw invalid citation checks and earlier rejected drafts are reported separately.",
+    "resource_metrics": "Retain all statuses, attempted embedding/chat counts, retries, repairs, supplier token usage, missing usage, known token totals and elapsed time. Unknown counts or missing usage stay null, not zero.",
+    "failure_preservation": "Nonzero exits and invalid outputs are first-run outcomes, never removed from the denominator. No unrecorded automatic paid reruns."
+  },
+  "ai_review": {
+    "method": "manual_ai_review_of_saved_outputs_and_their_shown_and_cited_evidence",
+    "paid_judge_requests": 0,
+    "expected_point_reviews": [
+      "index",
+      "covered",
+      "supporting_claim_indices",
+      "evidence_ids",
+      "reason"
+    ],
+    "claim_reviews": [
+      "index",
+      "citation_support",
+      "supporting_citation_ids",
+      "note"
+    ],
+    "claim_citation_reviews": [
+      "claim_index",
+      "citation_id",
+      "support",
+      "note"
+    ],
+    "claim_citation_support_values": [
+      "full_support",
+      "partial_support",
+      "irrelevant",
+      "wrong_source_scope"
+    ],
+    "citation_support_values": [
+      "supported",
+      "partially_supported",
+      "unsupported",
+      "wrong_source_scope"
+    ],
+    "source_scope_status": [
+      "pass",
+      "fail",
+      "not_applicable"
+    ],
+    "refusal_reasonable_with_shown": [
+      "yes",
+      "no",
+      "not_applicable"
+    ],
+    "ai_outcomes": [
+      "complete_supported_answer",
+      "incomplete_answer",
+      "unsupported_answer",
+      "reasonable_refusal_unanswerable",
+      "retrieval_limited_refusal_answerable",
+      "unreasonable_refusal",
+      "system_failure"
+    ],
+    "complete_answer_rule": "An answerable case is complete only when answered, all expected points are covered by published claims, every factual claim is supported by its actual cited shown text, and all question source constraints are met.",
+    "multiple_citations_rule": "A claim may be supported by the union of its own cited shown text. Record per-citation support separately so a partially supporting or irrelevant citation is not hidden by another complete citation.",
+    "source_scope_rule": "Body text supporting the same fact cannot satisfy a question explicitly restricted to the abstract. Annotated but unshown evidence cannot repair an answer after the fact.",
+    "partial_question_rule": "A compound question with only some requested facts supported is not a complete answer. Record partial coverage and unsupported claims separately.",
+    "refusal_rule": "A sensible evidence-limited refusal on an answerable question remains unfinished, not a successful unanswerable refusal. A negative case needs an appropriate insufficiency reason without fabricated factual answers.",
+    "aggregate_labels": "AI-assisted complete-answer/refusal/claim-support counts, with sample sizes; never present them as human-verified accuracy.",
+    "failure_categories": [
+      "retrieval_target_missing",
+      "context_omission",
+      "generation_or_semantic",
+      "source_scope",
+      "citation",
+      "structure",
+      "system"
+    ]
+  },
+  "human_review": {
+    "status": "pending",
+    "new_answer_semantic_support_score": null,
+    "note": "Existing human_verified question annotations do not imply that new generated answers have passed human review. Six new candidates are merged only after actual explicit human review."
+  },
+  "source_rubric_sha256": "4b9852b1b38391971d2965cfd0f1e51466ee003bca89df338488ba3b427cbd11",
+  "holdout_policy": {
+    "candidate_content_locked_before_any_run": true,
+    "formal_release_requires_actual_human_annotation_review": true,
+    "no_runs_before_phase": "D11",
+    "do_not_optimize_on_holdout": true,
+    "development_fact_family_reservations": "artifacts/d6/dev_fact_family_reservations.json",
+    "no_synthetic_human_scores": true,
+    "acceptance_case_count": 20,
+    "answerable_count": 17,
+    "unanswerable_count": 3
+  },
+  "aggregation": {
+    "answer_accuracy_denominator": "all 20 attempted acceptance cases; answerable insufficient, incomplete, unsupported and system failures count unsuccessful; negative success requires correct scope and no invented answer",
+    "answerable_completion_denominator": 17,
+    "unanswerable_refusal_denominator": 3,
+    "claim_support_denominator": "all factual published claims, conditional on published outputs; does not measure entire-case answer accuracy",
+    "machine_retrieval_denominator": "17 answerable cases / every annotated quote, returned and shown separately; exact-target proxy, not semantic recall",
+    "review_layers": "program / AI / actual human ratings kept separate; unreviewed human statistics null",
+    "sample_size": "Report N/M and case-type counts; no extrapolation to arbitrary papers or complex tasks"
+  },
+  "annotation_human_review": {
+    "status": "approved",
+    "record": "artifacts/d6/acceptance_human_review.json",
+    "actual_user_response": "已实际核对，20题全部通过",
+    "date": "2026-10-04"
+  },
+  "metadata_finalization_note": "Scoring rules unchanged from the pre-human content lock; dataset scope and actual annotation review metadata finalized before any acceptance run."
+}

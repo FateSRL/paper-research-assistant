@@ -1,0 +1,223 @@
+{
+  "source": {
+    "dataset": "AllenAI QASPER",
+    "version": "0.3",
+    "url": "https://qasper-dataset.s3.us-west-2.amazonaws.com/qasper-train-dev-v0.3.tgz",
+    "dataset_card": "https://huggingface.co/datasets/allenai/qasper",
+    "license": "CC BY 4.0",
+    "raw_path": "D:\\course\\paper-research-assistant\\eval\\qasper\\raw\\qasper-train-v0.3.json"
+  },
+  "split": "train",
+  "official_split": "train",
+  "cases": [
+    {
+      "paper_id": "1910.08772",
+      "question_id": "45893f31ef07f0cca5783bd39c4e60630d6b93b3",
+      "official_split": "train",
+      "split": "train",
+      "question": "How do they select monotonicity facts?",
+      "answers": [
+        {
+          "answer": {
+            "unanswerable": false,
+            "extractive_spans": [],
+            "yes_no": null,
+            "free_form_answer": "They derive it from Wordnet",
+            "evidence": [
+              "MonaLog utilizes two auxiliary sets. First, a knowledge base ${K}$ that stores the world knowledge needed for inference, e.g., semanticist $\\le $ linguist and swim $\\le $ move, which captures the facts that $[\\![\\mbox{\\em semanticist}]\\!]$ denotes a subset of $[\\![\\mbox{\\em linguist}]\\!]$, and that $[\\![\\mbox{\\em swim}]\\!]$ denotes a subset of $[\\![\\mbox{\\em move}]\\!]$, respectively. Such world knowledge can be created manually for the problem at hand, or derived easily from existing resources such as WordNet BIBREF22. Note that we do not blindly add all relations from WordNet to our knowledge base, since this would hinge heavily on word sense disambiguation (we need to know whether the “bank” is a financial institution or a river bank to extract its relations correctly). In the current implementation, we avoid this by adding x $\\le $ y or x $\\perp $ y relations only if both x and y are words in the premise-hypothesis pair. Additionally, some relations that involve quantifiers and prepositions need to be hard-coded, since WordNet does not include them: every $=$ all $=$ each $\\le $ most $\\le $ many $\\le $ a few $=$ several $\\le $ some $=$ a; the $\\le $ some $=$ a; on $\\perp $ off; up $\\perp $ down; etc."
+            ],
+            "highlighted_evidence": [
+              "MonaLog utilizes two auxiliary sets. First, a knowledge base ${K}$ that stores the world knowledge needed for inference, e.g., semanticist $\\le $ linguist and swim $\\le $ move, which captures the facts that $[\\![\\mbox{\\em semanticist}]\\!]$ denotes a subset of $[\\![\\mbox{\\em linguist}]\\!]$, and that $[\\![\\mbox{\\em swim}]\\!]$ denotes a subset of $[\\![\\mbox{\\em move}]\\!]$, respectively. Such world knowledge can be created manually for the problem at hand, or derived easily from existing resources such as WordNet BIBREF22. Note that we do not blindly add all relations from WordNet to our knowledge base, since this would hinge heavily on word sense disambiguation (we need to know whether the “bank” is a financial institution or a river bank to extract its relations correctly). In the current implementation, we avoid this by adding x $\\le $ y or x $\\perp $ y relations only if both x and y are words in the premise-hypothesis pair. Additionally, some relations that involve quantifiers and prepositions need to be hard-coded, since WordNet does not include them: every $=$ all $=$ each $\\le $ most $\\le $ many $\\le $ a few $=$ several $\\le $ some $=$ a; the $\\le $ some $=$ a; on $\\perp $ off; up $\\perp $ down; etc."
+            ]
+          },
+          "annotation_id": "472444c166c4bb6e942e0b2d97a61f3b74b3f953",
+          "worker_id": "5053f146237e8fc8859ed3984b5d3f02f39266b7"
+        }
+      ]
+    }
+  ],
+  "papers": {
+    "1910.08772": {
+      "title": "MonaLog: a Lightweight System for Natural Language Inference Based on Monotonicity",
+      "abstract": "We present a new logic-based inference engine for natural language inference (NLI) called MonaLog, which is based on natural logic and the monotonicity calculus. In contrast to existing logic-based approaches, our system is intentionally designed to be as lightweight as possible, and operates using a small set of well-known (surface-level) monotonicity facts about quantifiers, lexical items and tokenlevel polarity information. Despite its simplicity, we find our approach to be competitive with other logic-based NLI models on the SICK benchmark. We also use MonaLog in combination with the current state-of-the-art model BERT in a variety of settings, including for compositional data augmentation. We show that MonaLog is capable of generating large amounts of high-quality training data for BERT, improving its accuracy on SICK.",
+      "full_text": [
+        {
+          "section_name": "Introduction",
+          "paragraphs": [
+            "There has been rapid progress on natural language inference (NLI) in the last several years, due in large part to recent advances in neural modeling BIBREF0 and the introduction of several new large-scale inference datasets BIBREF1, BIBREF2, BIBREF3, BIBREF4. Given the high performance of current state-of-the-art models, there has also been interest in understanding the limitations of these models (given their uninterpretability) BIBREF5, BIBREF6, as well as finding systematic biases in benchmark datasets BIBREF7, BIBREF8. In parallel to these efforts, there have also been recent logic-based approaches to NLI BIBREF9, BIBREF10, BIBREF11, BIBREF12, BIBREF13, which take inspiration from linguistics. In contrast to early attempts at using logic BIBREF14, these approaches have proven to be more robust. However they tend to use many rules and their output can be hard to interpret. It is sometimes unclear whether the attendant complexity is justified, especially given that such models are currently far outpaced by data-driven models and are generally hard to hybridize with data-driven techniques.",
+            "In this work, we introduce a new logical inference engine called MonaLog, which is based on natural logic and work on monotonicity stemming from vanBenthemEssays86. In contrast to the logical approaches cited above, our starting point is different in that we begin with the following two questions: 1) what is the simplest logical system that one can come up with to solve empirical NLI problems (i.e., the system with minimal amounts of primitives and background knowledge)?; and 2) what is the lower-bound performance of such a model? Like other approaches to natural logic BIBREF15, BIBREF16, our model works by reasoning over surface forms (as opposed to translating to symbolic representations) using a small inventory of monotonicity facts about quantifiers, lexical items and token-level polarity BIBREF17; proofs in the calculus are hence fully interpretable and expressible in ordinary language. Unlike existing work on natural logic, however, our model avoids the need for having expensive alignment and search sub-procedures BIBREF18, BIBREF19, and relies on a much smaller set of background knowledge and primitive relations than MacCartneyManning.",
+            "To show the effectiveness of our approach, we show results on the SICK dataset BIBREF1, a common benchmark for logic-based NLI, and find MonaLog to be competitive with more complicated logic-based approaches (many of which require full semantic parsing and more complex logical machinery). We also introduce a supplementary version of SICK that corrects several common annotation mistakes (e.g., asymmetrical inference annotations) based on previous work by kalouli2017entail,kalouli2018. Positive results on both these datasets show the ability of lightweight monotonicity models to handle many of the inferences found in current NLI datasets, hence putting a more reliable lower-bound on what results the simplest logical approach is capable of achieving on this benchmark.",
+            "Since our logic operates over surface forms, it is straightforward to hybridize our models. We investigate using MonaLog in combination with the language model BERT BIBREF20, including for compositional data augmentation, i.e, re-generating entailed versions of examples in our training sets. To our knowledge, our approach is the first attempt to use monotonicity for data augmentation, and we show that such augmentation can generate high-quality training data with which models like BERT can improve performance."
+          ]
+        },
+        {
+          "section_name": "Our System: MonaLog",
+          "paragraphs": [
+            "The goal of NLI is to determine, given a premise set $P$ and a hypothesis sentence $H$, whether $H$ follows from the meaning of $P$ BIBREF21. In this paper, we look at single-premise problems that involve making a standard 3-way classification decision (i.e., Entailment (H), Contradict (C) and Neutral (N)). Our general monotonicity reasoning system works according to the pipeline in Figure FIGREF1. Given a premise text, we first do Arrow Tagging by assigning polarity annotations (i.e., the arrows $\\uparrow ,\\downarrow $, which are the basic primitives of our logic) to tokens in text. These surface-level annotations, in turn, are associated with a set of natural logic inference rules that provide instructions for how to generate entailments and contradictions by span replacements over these arrows (which relies on a library of span replacement rules). For example, in the sentence All schoolgirls are on the train, the token schoolgirls is associated with a polarity annotation $\\downarrow $, which indicates that in this sentential context, the span schoolgirls can be replaced with a semantically more specific concept (e.g., happy schoolgirls) in order to generate an entailment. A generation and search procedure is then applied to see if the hypothesis text can be generated from the premise using these inference rules. A proof in this model is finally a particular sequence of edits (e.g., see Figure FIGREF13) that derive the hypothesis text from the premise text rules and yield an entailment or contradiction.",
+            "In the following sections, we provide the details of our particular implementation of these different components in MonaLog."
+          ]
+        },
+        {
+          "section_name": "Our System: MonaLog ::: Polarization (Arrow Tagging)",
+          "paragraphs": [
+            "Given an input premise $P$, MonaLog first polarizes each of its tokens and constituents, calling the system described by BIBREF17, which performs polarization on a CCG parse tree. For example, a polarized $P$ could be every$^{\\leavevmode {\\color {red}\\uparrow }}$ linguist$^{\\leavevmode {\\color {red}\\downarrow }}$ swim$^{\\leavevmode {\\color {red}\\uparrow }}$. Note that since we ignore morphology in the system, tokens are represented by lemmas."
+          ]
+        },
+        {
+          "section_name": "Our System: MonaLog ::: Knowledge Base @!START@${K}$@!END@ and Sentence Base @!START@${S}$@!END@",
+          "paragraphs": [
+            "MonaLog utilizes two auxiliary sets. First, a knowledge base ${K}$ that stores the world knowledge needed for inference, e.g., semanticist $\\le $ linguist and swim $\\le $ move, which captures the facts that $[\\![\\mbox{\\em semanticist}]\\!]$ denotes a subset of $[\\![\\mbox{\\em linguist}]\\!]$, and that $[\\![\\mbox{\\em swim}]\\!]$ denotes a subset of $[\\![\\mbox{\\em move}]\\!]$, respectively. Such world knowledge can be created manually for the problem at hand, or derived easily from existing resources such as WordNet BIBREF22. Note that we do not blindly add all relations from WordNet to our knowledge base, since this would hinge heavily on word sense disambiguation (we need to know whether the “bank” is a financial institution or a river bank to extract its relations correctly). In the current implementation, we avoid this by adding x $\\le $ y or x $\\perp $ y relations only if both x and y are words in the premise-hypothesis pair. Additionally, some relations that involve quantifiers and prepositions need to be hard-coded, since WordNet does not include them: every $=$ all $=$ each $\\le $ most $\\le $ many $\\le $ a few $=$ several $\\le $ some $=$ a; the $\\le $ some $=$ a; on $\\perp $ off; up $\\perp $ down; etc.",
+            "We also need to keep track of relations that can potentially be derived from the $P$-$H$ sentence pair. For instance, for all adjectives and nouns that appear in the sentence pair, it is easy to obtain: adj + n $\\le $ n (black cat $\\le $ cat). Similarly, we have n + PP/relative clause $\\le $ n (friend in need $\\le $ friend, dog that bites $\\le $ dog), VP + advP/PP $\\le $ VP (dance happily/in the morning $\\le $ dance), and so on. We also have rules that extract pieces of knowledge from $P$ directly, e.g.: n$_1$ $\\le $ n$_2$ from sentences of the pattern every n$_1$ is a n$_2$. One can also connect MonaLog to bigger knowledge graphs or ontologies such as DBpedia.",
+            "A sentence base ${S}$, on the other hand, stores the generated entailments and contradictions."
+          ]
+        },
+        {
+          "section_name": "Our System: MonaLog ::: Generation",
+          "paragraphs": [
+            "Once we have a polarized CCG tree, and some $\\le $ relations in ${K}$, generating entailments and contradictions is fairly straightforward. A concrete example is given in Figure FIGREF13. Note that the generated $\\le $ instances are capable of producing mostly monotonicity inferences, but MonaLog can be extended to include other more complex inferences in natural logic, hence the name MonaLog. This extension is addressed in more detail in HuChenMoss."
+          ]
+        },
+        {
+          "section_name": "Our System: MonaLog ::: Generation ::: Entailments/inferences",
+          "paragraphs": [
+            "The key operation for generating entailments is replacement, or substitution. It can be summarized as follows: 1) For upward-entailing (UE) words/constituents, replace them with words/constituents that denote bigger sets. 2) For downward-entailing (DE) words/constituents, either replace them with those denoting smaller sets, or add modifiers (adjectives, adverbs and/or relative clauses) to create a smaller set. Thus for every$^{\\leavevmode {\\color {red}\\uparrow }}$ linguist$^{\\leavevmode {\\color {red}\\downarrow }}$ swim$^{\\leavevmode {\\color {red}\\uparrow }}$, MonaLog can produce the following three entailments by replacing each word with the appropriate word from ${K}$: most$^{\\leavevmode {\\color {red}\\uparrow }}$ linguist$^{\\leavevmode {\\color {red}\\downarrow }}$ swim$^{\\leavevmode {\\color {red}\\uparrow }}$, every$^{\\leavevmode {\\color {red}\\uparrow }}$ semanticist$^{\\leavevmode {\\color {red}\\downarrow }}$ swim$^{\\leavevmode {\\color {red}\\uparrow }}$ and every$^{\\leavevmode {\\color {red}\\uparrow }}$ linguist$^{\\leavevmode {\\color {red}\\downarrow }}$ move$^{\\leavevmode {\\color {red}\\uparrow }}$. These are results of one replacement.",
+            "Performing replacement for multiple rounds/depths can easily produce many more entailments."
+          ]
+        },
+        {
+          "section_name": "Our System: MonaLog ::: Generation ::: Contradictory sentences",
+          "paragraphs": [
+            "To generate sentences contradictory to the input sentence, we do the following: 1) if the sentence starts with “no (some)”, replace the first word with “some (no)”. 2) If the object is quantified by “a/some/the/every”, change the quantifier to “no”, and vice versa. 3) Negate the main verb or remove the negation. See examples in Figure FIGREF13."
+          ]
+        },
+        {
+          "section_name": "Our System: MonaLog ::: Generation ::: Neutral sentences",
+          "paragraphs": [
+            "MonaLog returns Neutral if it cannot find the hypothesis $H$ in ${S}.entailments$ or ${S}.contradictions$. Thus, there is no need to generate neutral sentences."
+          ]
+        },
+        {
+          "section_name": "Our System: MonaLog ::: Search",
+          "paragraphs": [
+            "Now that we have a set of inferences and contradictions stored in ${S}$, we can simply see if the hypothesis is in either one of the sets by comparing the strings. If yes, then return Entailment or Contradiction; if not, return Neutral, as schematically shown in Figure FIGREF13. However, the exact-string-match method is too brittle. Therefore, we apply a heuristic. If the only difference between sentences $S_1$ and $S_2$ is in the set {“a”, “be”, “ing”}, then $S_1$ and $S_2$ are considered semantically equivalent.",
+            "The search is implemented using depth first search, with a default depth of 2, i.e. at most 2 replacements for each input sentence. At each node, MonaLog “expands” the sentence (i.e., an entailment of its parent) by obtaining its entailments and contradictions, and checks whether $H$ is in either set. If so, the search is terminated; otherwise the systems keeps searching until all the possible entailments and contradictions up to depth 2 have been visited."
+          ]
+        },
+        {
+          "section_name": "MonaLog and SICK",
+          "paragraphs": [
+            "We perform two experiments to test MonaLog. We first use MonaLog to solve the problems in a commonly used natural language inference dataset, SICK BIBREF1, comparing our results with previous systems. Second, we test the quality of the data generated by MonaLog. To do this, we generate more training data (sentence pairs) from the SICK training data using our system, and performe fine-tuning on BERT BIBREF20, a language model based on the transformer architecture BIBREF23, with the expanded dataset. In all experiments, we use the Base, Uncased model of BERT."
+          ]
+        },
+        {
+          "section_name": "MonaLog and SICK ::: The SICK Dataset",
+          "paragraphs": [
+            "The SICK BIBREF1 dataset includes around 10,000 English sentence pairs that are annotated to have either “Entailment”, “Neutral” or “Contradictory” relations. We choose SICK as our testing ground for several reasons. First, we want to test on a large-scale dataset, since we have shown that a similar model BIBREF24 reaches good results on parts of the smaller FraCaS dataset BIBREF25. Second, we want to make our results comparable to those of previous logic-based models such as the ones described in BIBREF26, BIBREF27, BIBREF11, BIBREF13, which were also tested on SICK. We use the data split provided in the dataset: 4,439 training problems, 4,906 test problems and 495 trial problems, see Table TABREF16 for examples."
+          ]
+        },
+        {
+          "section_name": "MonaLog and SICK ::: Hand-corrected SICK",
+          "paragraphs": [
+            "There are numerous issues with the original SICK dataset, as illustrated by BIBREF28, BIBREF29.",
+            "They first manually checked 1,513 pairs tagged as “A entails B but B is neutral to A” (AeBBnA) in the original SICK, correcting 178 pairs that they considered to be wrong BIBREF28. Later, BIBREF29 extracted pairs from SICK whose premise and hypothesis differ in only one word, and created a simple rule-based system that used WordNet information to solve the problem. Their WordNet-based method was able to solve 1,651 problems, whose original labels in SICK were then manually checked and corrected against their system's output. They concluded that 336 problems are wrongly labeled in the original SICK. Combining the above two corrected subsets of SICK, minus the overlap, results in their corrected SICK dataset, which has 3,016 problems (3/10 of the full SICK), with 409 labels different from the original SICK (see breakdown in Table TABREF19). 16 of the corrections are in the trial set, 197 of them in the training set and 196 in the test set. This suggests that more than one out of ten problems in SICK are potentially problematic. For this reason, two authors of the current paper checked the 409 changes. We found that only 246 problems are labeled the same by our team and by BIBREF29. For cases where there is disagreement, we adjudicated the differences after a discussion.",
+            "We are aware that the partially checked SICK (by two teams) is far from ideal. We therefore present results for two versions of SICK for experiment 1 (section SECREF4): the original SICK and the version corrected by our team. For the data augmentation experiment in section SECREF5, we only performed fine-tuning on the corrected SICK. As shown in a recent SICK annotation experiment by kalouli2019explaining, annotation is a complicated issue influenced by linguistic and non-linguistic factors. We leave checking the full SICK dataset to future work."
+          ]
+        },
+        {
+          "section_name": "Experiment 1: Using MonaLog Directly ::: Setup and Preprocessing",
+          "paragraphs": [
+            "The goal of experiment 1 is to test how accurately MonaLog solves problems in a large-scale dataset. We first used the system to solve the 495 problems in the trial set and then manually identified the cases in which the system failed. Then we determined which syntactic transformations are needed for MonaLog. After improving the results on the trial data by introducing a preprocessing step to handle limited syntactic variation (see below), we applied MonaLog on the test set. This means that the rule base of the system was optimized on the trial data, and we can test its generalization capability on the test data.",
+            "The main obstacle for MonaLog is the syntactic variations in the dataset, illustrated in some examples in Table TABREF16. There exist multiple ways of dealing with these variations: One approach is to `normalize' unknown syntactic structures to a known structure. For example, we can transform passive sentences into active ones and convert existential sentences into the base form (see ex. 8399 and 219 in Table TABREF16). Another approach is to use some more abstract syntactic/semantic representation so that the linear word order can largely be ignored, e.g., represent a sentence by its dependency parse, or use Abstract Meaning Representation. Here, we explore the first option and leave the second approach to future work. We believe that dealing with a wide range of syntactic variations requires tools designed specifically for that purpose. The goal of MonaLog is to generate entailments and contradictions based on a polarized sentence instead.",
+            "Below, we list the most important syntactic transformations we perform in preprocessing.",
+            "Convert all passive sentences to active using pass2act. If the passive does not contain a by phrase, we add by a person.",
+            "Convert existential clauses into their base form (see ex. 219 in Table TABREF16).",
+            "Other transformations: someone/anyone/no one $\\rightarrow ~$some/any/no person; there is no man doing sth. $\\rightarrow ~$no man is doing sth.; etc."
+          ]
+        },
+        {
+          "section_name": "Experiment 1: Using MonaLog Directly ::: Results",
+          "paragraphs": [
+            "The results of our system on uncorrected and corrected SICK are presented in Table TABREF27, along with comparisons with other systems.",
+            "Our accuracy on the uncorrected SICK (77.19%) is much higher than the majority baseline (56.36%) or the hypothesis-only baseline (56.87%) reported by BIBREF8, and only several points lower than current logic-based systems. Since our system is based on natural logic, there is no need for translation into logical forms, which makes the reasoning steps transparent and much easier to interpret. I.e., with entailments and contradictions, we can generate a natural language trace of the system, see Fig. FIGREF13.",
+            "Our results on the corrected SICK are even higher (see lower part of Table TABREF27), demonstrating the effect of data quality on the final results. Note that with some simple syntactic transformations we can gain 1-2 points in accuracy.",
+            "Table TABREF28 shows MonaLog's performance on the individual relations. The system is clearly very good at identifying entailments and contradictions, as demonstrated by the high precision values, especially on the corrected SICK set (98.50 precision for E and 95.02 precision for C). The lower recall values are due to MonaLog's current inability to handle syntactic variation.",
+            "Based on these results, we tested a hybrid model of MonaLog and BERT (see Table TABREF27) where we exploit MonaLog's strength: Since MonaLog has a very high precision on Entailment and Contradiction, we can always trust MonaLog if it predicts E or C; when it returns N, we then fall back to BERT. This hybrid model improves the accuracy of BERT by 1% absolute to 85.95% on the corrected SICK. On the uncorrected SICK dataset, the hybrid system performs worse than BERT.",
+            "Since MonaLog is optimized for the corrected SICK, it may mislabel many E and C judgments in the uncorrected dataset. The stand-alone BERT system performs better on the uncorrected data (86.74%) than the corrected set (85.00%). The corrected set may be too inconsistent since only a part has been checked.",
+            "Overall, these hybird results show that it is possible to combine our high-precision system with deep learning architectures. However, more work is necessary to optimize this combined system."
+          ]
+        },
+        {
+          "section_name": "Experiment 1: Using MonaLog Directly ::: Error Analysis",
+          "paragraphs": [
+            "Upon closer inspection, some of MonaLog's errors consist of difficult cases, as shown in Table TABREF29. For example, in ex. 359, if our knowledge base ${K}$ contains the background fact $\\mbox{\\em chasing} \\le \\mbox{\\em running}$, then MonaLog's judgment of C would be correct. In ex. 1402, if crying means screaming, then the label should be E; however, if crying here means shedding tears, then the label should probably be N. Here we also see potentially problematic labels (ex. 1760, 3403) in the original SICK dataset.",
+            "Another point of interest is that 19 of MonaLog's mistakes are related to the antonym pair man vs. woman (e.g., ex. 5793 in Table TABREF29). This points to inconsistency of the SICK dataset: Whereas there are at least 19 cases tagged as Neutral (e.g., ex. 5793), there are at least 17 such pairs that are annotated as Contradictions in the test set (e.g., ex. 3521), P: A man is dancing, H: A woman is dancing (ex. 9214), P: A shirtless man is jumping over a log, H: A shirtless woman is jumping over a log. If man and woman refer to the same entity, then clearly that entity cannot be man and woman at the same time, which makes the sentence pair a contradiction. If, however, they do not refer to the same entity, then they should be Neutral."
+          ]
+        },
+        {
+          "section_name": "Experiment 2: Data Generation Using MonaLog",
+          "paragraphs": [
+            "Our second experiment focuses on using MonaLog to generate additional training data for machine learning models such as BERT. To our knowledge, this is the first time that a rule-based NLI system has been successfully used to generate training data for a deep learning application."
+          ]
+        },
+        {
+          "section_name": "Experiment 2: Data Generation Using MonaLog ::: Setup",
+          "paragraphs": [
+            "As described above, MonaLog generates entailments and contradictions when solving problems. These can be used as additional training data for a machine learning model.",
+            "I.e., we pair the newly generated sentences",
+            "with their input sentence, creating new pairs for training. For example, we take all the sentences in the nodes in Figure FIGREF13 as inferences and all the sentences in rectangles as contradictions, and then form sentence pairs with the input sentence. The additional data can be used directly, almost without human intervention.",
+            "Thus for experiment 2, the goal is to examine the quality of these generated sentence pairs. For this, we re-train a BERT model on these pairs. If BERT trained on the manually annotated SICK training data is improved by adding data generated by MonaLog, then we can conclude that the generated data is of high quality, even comparable to human annotated data, which is what we found.",
+            "More specifically, we compare the performance of BERT models trained on a) SICK training data alone, and b) SICK training data plus the entailing and contradictory pairs generated by MonaLog.",
+            "All experiments are carried out using our corrected version of the SICK data set.",
+            "However, note that MonaLog is designed to only generate entailments and contradictions. Thus, we only have access to newly generated examples for those two cases, we do not acquire any additional neutral cases. Consequently, adding these examples to the training data will introduce a skewing that does not reflect the class distribution in the test set. Since this will bias the machine learner against neutral cases, we use the following strategy to counteract that tendency: We relabel all cases where BERT is not confident enough for either E or C into N. We set this threshold to 0.95 but leave further optimization of the threshold to future work."
+          ]
+        },
+        {
+          "section_name": "Experiment 2: Data Generation Using MonaLog ::: Data Filtering and Quality Control",
+          "paragraphs": [
+            "MonaLog is prone to over-generation. For example, it may wrongly add the same adjective before a noun (phrase) twice to create a more specific noun, e.g., young young man $\\le $ young man $\\le $ man. Since it is possible that such examples influence the machine learning model negatively, we look into filtering such examples to improve the quality of the additional training data.",
+            "We manually inspected 100 sentence pairs generated by MonaLog to check the quality and naturalness of the new sentences (see Table TABREF32 for examples). All of the generated sentences are correct in the sense that the relation between the premise and the hypothesis is correctly labeled as entailment or contradiction (see Table TABREF34).",
+            "While we did not find any sentence pairs with wrong labels, some generated sentences are unnatural, as shown in Table TABREF32. Both unnatural examples contain two successive copies of the same PP.",
+            "Note that our data generation hinges on correct polarities on the words and constituents. For instance, in the last example of Table TABREF32, the polarization system needs to know that few is downward entailing on both of its arguments, and without flips the arrow of its argument, in order to produce the correct polarities, on which the replacement of MonaLog depends.",
+            "In order to filter unnatural sentences, such as the examples in Table TABREF32, we use a rule-based filter and remove sentences that contain bigrams of repeated words. We experiment with using one quarter or one half randomly selected sentences in addition to a setting where we use the complete set of generated sentences."
+          ]
+        },
+        {
+          "section_name": "Experiment 2: Data Generation Using MonaLog ::: Results",
+          "paragraphs": [
+            "Table TABREF37 shows the amount of additional sentence pairs per category along with the results of using the automatically generated sentences as additional training data. It is obvious that adding the additional training data results in gains in accuracy even though the training data becomes increasingly skewed towards E and C. When we add all additional sentence pairs, accuracy increases by more than 1.5 percent points. This demonstrates both the robustness of BERT in the current experiment and the usefulness of the generated data. The more data we add, the better the system performs.",
+            "We also see that raising the threshold to relabel uncertain cases as neutral gives a small boost, from 86.51% to 86.71%. This translates into 10 cases where the relabeling corrected the answer. Finally, we also investigated whether the hybrid system, i.e., MonaLog followed by the re-trained BERT, can also profit from the additional training data. Intuitively, we would expect smaller gains since MonaLog already handles a fair amount of the entailments and contradictions, i.e., those cases where BERT profits from more examples. However the experiments show that the hybrid system reaches an even higher accuracy of 87.16%, more than 2 percent points above the baseline, equivalent to roughly 100 more problems correctly solved. Setting the high threshold for BERT to return E or C further improves accuracy to 87.49%. This brings us into the range of the state-of-the-art results, even though a direct comparison is not possible because of the differences between the corrected and uncorrected dataset."
+          ]
+        },
+        {
+          "section_name": "Conclusions and Future Work",
+          "paragraphs": [
+            "We have presented a working natural-logic-based system, MonaLog, which attains high accuracy on the SICK dataset and can be used to generated natural logic proofs. Considering how simple and straightforward our method is, we believe it can serve as a strong baseline or basis for other (much) more complicated systems, either logic-based or ML/DL-based. In addition, we have shown that MonaLog can generate high-quality training data, which improves the accuracy of a deep learning model when trained on the expanded dataset. As a minor point, we manually checked the corrected SICK dataset by BIBREF28, BIBREF29.",
+            "There are several directions for future work. The first direction concerns the question how to handle syntactic variation from natural language input. That is, the computational process(es) for inference will usually be specified in terms of strict syntactic conditions, and naturally occurring sentences will typically not conform to those conditions. Among the strategies which allow their systems to better cope with premises and hypotheses with various syntactic structures are sophisticated versions of alignment used by e.g. MacCartney,YanakaMMB18. We will need to extend MonaLog to be able to handle such variation. In the future, we plan to use dependency relations as representations of natural language input and train a classifier that can determine which relations are crucial for inference.",
+            "Second, as mentioned earlier, we are in need of a fully (rather than partially) checked SICK dataset to examine the impact of data quality on the results since the partially checked dataset may be inherently inconsistent between the checked and non-checked parts.",
+            "Finally, with regard to the machine learning experiments, we plan to investigate other methods of addressing the imbalance in the training set created by additional entailments and contradictions. We will look into options for artificially creating neutral examples, e.g. by finding reverse entailments, as illustrated by richardson2019probing."
+          ]
+        },
+        {
+          "section_name": "Acknowledgements",
+          "paragraphs": [
+            "We thank the anonymous reviewers for their helpful comments. Hai Hu is supported by China Scholarship Council."
+          ]
+        }
+      ]
+    }
+  },
+  "selection": {
+    "parent_sample_id": "train20",
+    "parent_seed": 20261020,
+    "count": 1,
+    "question_ids": [
+      "45893f31ef07f0cca5783bd39c4e60630d6b93b3"
+    ],
+    "rule": "Single target question copied from the prior three-question batch; no answer-based selection.",
+    "selected_question_count": 1,
+    "selected_paper_count": 1,
+    "method": "explicit faithfulness check for the preserved MinerU API parse"
+  },
+  "sample_id": "monalog-api-faithfulness-one-20261025",
+  "experiment_scope": "Targeted regression from previously seen five-question sample; not a held-out evaluation."
+}

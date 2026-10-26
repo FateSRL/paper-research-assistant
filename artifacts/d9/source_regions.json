@@ -1,0 +1,296 @@
+{
+  "schema_revision": "d9-source-regions-v1",
+  "document_scope": "three_existing_full_paper_revision_pairs",
+  "coordinate_system": "Python Unicode code points within immutable filtered segment",
+  "review_scope": "PDF structure and exact source ranges; no QA semantic accuracy claim",
+  "AI_structural_review_completed": true,
+  "independent_human_review": "confirmed",
+  "online_question_labels_used": false,
+  "API_requests": 0,
+  "documents": [
+    {
+      "paper_id": "arxiv_2005.11401v4",
+      "parse_revision": "r_269ac0cb1263292d",
+      "pdf_sha256": "23e3249e9a1e75418d82efecab0ea8c4d033b89c93742f63208d47ce01f21233",
+      "parsed_input_sha256": "e89ae018a56d0828c78a42a57fbe6f93d93b80ff7cc6c002deabcb7e90bb3627",
+      "filtered_input_sha256": "929e15cb62872fc0f9b5fb79ff7b6cddd3499f3d0c7e73c43768096e9f19315a",
+      "chunk_snapshot_sha256": "1ff5e795471aabf0e43d73a50a2283076510b32cdc4cab68fc3f50ed5a47afbc",
+      "files": {
+        "pdf": {
+          "path": "data/papers/2005.11401v4.pdf",
+          "sha256": "23e3249e9a1e75418d82efecab0ea8c4d033b89c93742f63208d47ce01f21233"
+        },
+        "parsed": {
+          "path": "data/parsed/arxiv_2005.11401v4.jsonl",
+          "sha256": "e89ae018a56d0828c78a42a57fbe6f93d93b80ff7cc6c002deabcb7e90bb3627"
+        },
+        "filtered": {
+          "path": "data/filtered/arxiv_2005.11401v4.jsonl",
+          "sha256": "929e15cb62872fc0f9b5fb79ff7b6cddd3499f3d0c7e73c43768096e9f19315a"
+        },
+        "chunks": {
+          "path": "data/chunks/arxiv_2005.11401v4/r_269ac0cb1263292d/chunks.jsonl",
+          "sha256": "1ff5e795471aabf0e43d73a50a2283076510b32cdc4cab68fc3f50ed5a47afbc"
+        },
+        "snapshot_raw": {
+          "path": "data/chunks/arxiv_2005.11401v4/r_269ac0cb1263292d/raw.pages.jsonl",
+          "sha256": "e89ae018a56d0828c78a42a57fbe6f93d93b80ff7cc6c002deabcb7e90bb3627"
+        },
+        "snapshot_filtered": {
+          "path": "data/chunks/arxiv_2005.11401v4/r_269ac0cb1263292d/filtered.pages.jsonl",
+          "sha256": "929e15cb62872fc0f9b5fb79ff7b6cddd3499f3d0c7e73c43768096e9f19315a"
+        },
+        "manifest": {
+          "path": "data/chunks/arxiv_2005.11401v4/r_269ac0cb1263292d/version_manifest.json",
+          "sha256": "595430fef95af151b9c60c1ad02382663136507c468492cd06a0237fa97af5f1"
+        },
+        "paper": {
+          "path": "data/chunks/arxiv_2005.11401v4/r_269ac0cb1263292d/paper.json",
+          "sha256": "0fd51fe0ebba3b70aaecd135abea580d88f0c73f9cf8c97b0935c2bb127bc1d4"
+        }
+      },
+      "regions": [
+        {
+          "scope": "abstract",
+          "pdf_page": 1,
+          "segment_id": "arxiv_2005.11401v4:p1:b8:l0-20:acb1e73b3bf2",
+          "source_block_index": 8,
+          "source_line_indices": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            10,
+            11,
+            12,
+            13,
+            14,
+            15,
+            16,
+            17,
+            18,
+            19,
+            20
+          ],
+          "segment_char_start": 0,
+          "segment_char_end": 1611,
+          "text_sha256": "acb1e73b3bf2ca7e711623aa1b8bdb9c61228a7339077f27e7528a6b508685b9",
+          "verification_status": "verified",
+          "verification_method": "AI_structural_review",
+          "human_review_status": "confirmed",
+          "structural_evidence": {
+            "review_basis": "original_pdf_visual_and_exact_parse_filter_comparison",
+            "reviewer": "AI structural review; not an independent human review",
+            "heading_block_index": 7,
+            "body_block_index": 8,
+            "following_heading_block_index": 9,
+            "heading_text_sha256": "d21b4a64a2d8656a0fdf7ab2e89a49164ac504686cfa2a3d442e87c209286330",
+            "following_heading_text_sha256": "614b7817d00ff4e9e42570bd4937766ea922c283f275a854e10357262432b7f9",
+            "visual_evidence": {
+              "path": "artifacts/d9/source_region_review/arxiv_2005.11401v4_page1.png",
+              "sha256": "f724c5fd889202f682c1a153eac6f25393dbf4d4e6105f70f150517a7141f6cb"
+            },
+            "renderer": "Poppler pdftoppm; page selection is for review, not qualification",
+            "segment_bbox_is_exact_chunk_box": false
+          }
+        }
+      ]
+    },
+    {
+      "paper_id": "arxiv_2210.03629v3",
+      "parse_revision": "r_22af23d03fcb87a8",
+      "pdf_sha256": "f285b0971ae4a790e402fb93966bed3adde2cf0a04977d08b2b40d6ab0cace69",
+      "parsed_input_sha256": "8cc9e734a83b1153f035d7fe19f76ae8db43a7e432bc7a647360adfa8d605bae",
+      "filtered_input_sha256": "1e14e78bbb77ee549887e3bafcc1d9822ee461e93db391c285baadfd4e71eef6",
+      "chunk_snapshot_sha256": "8f47afd4c30fd0d1fb3ad85bb5ddd9eebf7d81576725876a9f4cbc283a063cb2",
+      "files": {
+        "pdf": {
+          "path": "data/papers/2210.03629v3.pdf",
+          "sha256": "f285b0971ae4a790e402fb93966bed3adde2cf0a04977d08b2b40d6ab0cace69"
+        },
+        "parsed": {
+          "path": "data/parsed/arxiv_2210.03629v3.jsonl",
+          "sha256": "8cc9e734a83b1153f035d7fe19f76ae8db43a7e432bc7a647360adfa8d605bae"
+        },
+        "filtered": {
+          "path": "data/filtered/arxiv_2210.03629v3.jsonl",
+          "sha256": "1e14e78bbb77ee549887e3bafcc1d9822ee461e93db391c285baadfd4e71eef6"
+        },
+        "chunks": {
+          "path": "data/chunks/arxiv_2210.03629v3/r_22af23d03fcb87a8/chunks.jsonl",
+          "sha256": "8f47afd4c30fd0d1fb3ad85bb5ddd9eebf7d81576725876a9f4cbc283a063cb2"
+        },
+        "snapshot_raw": {
+          "path": "data/chunks/arxiv_2210.03629v3/r_22af23d03fcb87a8/raw.pages.jsonl",
+          "sha256": "8cc9e734a83b1153f035d7fe19f76ae8db43a7e432bc7a647360adfa8d605bae"
+        },
+        "snapshot_filtered": {
+          "path": "data/chunks/arxiv_2210.03629v3/r_22af23d03fcb87a8/filtered.pages.jsonl",
+          "sha256": "1e14e78bbb77ee549887e3bafcc1d9822ee461e93db391c285baadfd4e71eef6"
+        },
+        "manifest": {
+          "path": "data/chunks/arxiv_2210.03629v3/r_22af23d03fcb87a8/version_manifest.json",
+          "sha256": "cde4a85d4776996d9b68eb84f84801595f433e76e1c30c311d0b883805b89824"
+        },
+        "paper": {
+          "path": "data/chunks/arxiv_2210.03629v3/r_22af23d03fcb87a8/paper.json",
+          "sha256": "179a0b490ce1acefaf40d9e4d22af68579f11908cc06ec0af4fd5687dd30be8a"
+        }
+      },
+      "regions": [
+        {
+          "scope": "abstract",
+          "pdf_page": 1,
+          "segment_id": "arxiv_2210.03629v3:p1:b5:l0-19:c5c7ec8ec83e",
+          "source_block_index": 5,
+          "source_line_indices": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            10,
+            11,
+            12,
+            13,
+            14,
+            15,
+            16,
+            17,
+            18,
+            19
+          ],
+          "segment_char_start": 0,
+          "segment_char_end": 1545,
+          "text_sha256": "c5c7ec8ec83ebf55ee61cb097c1b21b5db9c552ae9e17d79a5351bd00305e360",
+          "verification_status": "verified",
+          "verification_method": "AI_structural_review",
+          "human_review_status": "confirmed",
+          "structural_evidence": {
+            "review_basis": "original_pdf_visual_and_exact_parse_filter_comparison",
+            "reviewer": "AI structural review; not an independent human review",
+            "heading_block_index": 4,
+            "body_block_index": 5,
+            "following_heading_block_index": 6,
+            "heading_text_sha256": "3d1626989d3e923485561f1e5bdeaa583842a399edaf8cb6df59dbc6f17848f8",
+            "following_heading_text_sha256": "0b1530fd2af9b6413ad8a104720ba16ec58bca388cafbb998772be2f852f484b",
+            "visual_evidence": {
+              "path": "artifacts/d9/source_region_review/arxiv_2210.03629v3_page1.png",
+              "sha256": "1b3a42cd7d31e0143db5e8c761e5b2f59c0384cb5b17d90602b2fbea7689ab1f"
+            },
+            "renderer": "Poppler pdftoppm; page selection is for review, not qualification",
+            "segment_bbox_is_exact_chunk_box": false
+          }
+        }
+      ]
+    },
+    {
+      "paper_id": "arxiv_2303.11366v4",
+      "parse_revision": "r_d7736b29a2d8b39e",
+      "pdf_sha256": "6059b6f89fea9959bd3dab553fbb97756a3dfb1b15e3cbab2fbf3ab6664333bd",
+      "parsed_input_sha256": "6382ce6063dbc602659f43e15f485bea17c2e2e9591a50b2e5d3d9a6027faada",
+      "filtered_input_sha256": "1fce4cb3c7f035d4c93e49352342a2f074749dca8a006d768d900d29d619fb31",
+      "chunk_snapshot_sha256": "2daee32503b432515e4363b50086471db4c297317e429bef71d7e4c98f761b09",
+      "files": {
+        "pdf": {
+          "path": "data/papers/2303.11366v4.pdf",
+          "sha256": "6059b6f89fea9959bd3dab553fbb97756a3dfb1b15e3cbab2fbf3ab6664333bd"
+        },
+        "parsed": {
+          "path": "data/parsed/arxiv_2303.11366v4.jsonl",
+          "sha256": "6382ce6063dbc602659f43e15f485bea17c2e2e9591a50b2e5d3d9a6027faada"
+        },
+        "filtered": {
+          "path": "data/filtered/arxiv_2303.11366v4.jsonl",
+          "sha256": "1fce4cb3c7f035d4c93e49352342a2f074749dca8a006d768d900d29d619fb31"
+        },
+        "chunks": {
+          "path": "data/chunks/arxiv_2303.11366v4/r_d7736b29a2d8b39e/chunks.jsonl",
+          "sha256": "2daee32503b432515e4363b50086471db4c297317e429bef71d7e4c98f761b09"
+        },
+        "snapshot_raw": {
+          "path": "data/chunks/arxiv_2303.11366v4/r_d7736b29a2d8b39e/raw.pages.jsonl",
+          "sha256": "6382ce6063dbc602659f43e15f485bea17c2e2e9591a50b2e5d3d9a6027faada"
+        },
+        "snapshot_filtered": {
+          "path": "data/chunks/arxiv_2303.11366v4/r_d7736b29a2d8b39e/filtered.pages.jsonl",
+          "sha256": "1fce4cb3c7f035d4c93e49352342a2f074749dca8a006d768d900d29d619fb31"
+        },
+        "manifest": {
+          "path": "data/chunks/arxiv_2303.11366v4/r_d7736b29a2d8b39e/version_manifest.json",
+          "sha256": "a835281cc6c4bae84affc35277400a61b7f27c62dbf49412a7d2248c73b302ff"
+        },
+        "paper": {
+          "path": "data/chunks/arxiv_2303.11366v4/r_d7736b29a2d8b39e/paper.json",
+          "sha256": "8d678adedd9a0086d260d858e3a0940994fbfc6695323419bbe2f69b18570997"
+        }
+      },
+      "regions": [
+        {
+          "scope": "abstract",
+          "pdf_page": 1,
+          "segment_id": "arxiv_2303.11366v4:p1:b11:l0-17:3a68a3cbb4cf",
+          "source_block_index": 11,
+          "source_line_indices": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            10,
+            11,
+            12,
+            13,
+            14,
+            15,
+            16,
+            17
+          ],
+          "segment_char_start": 0,
+          "segment_char_end": 1442,
+          "text_sha256": "3a68a3cbb4cf3311a3414342decc91af912e51116737fd11da565cd28e2a7a1d",
+          "verification_status": "verified",
+          "verification_method": "AI_structural_review",
+          "human_review_status": "confirmed",
+          "structural_evidence": {
+            "review_basis": "original_pdf_visual_and_exact_parse_filter_comparison",
+            "reviewer": "AI structural review; not an independent human review",
+            "heading_block_index": 10,
+            "body_block_index": 11,
+            "following_heading_block_index": 12,
+            "heading_text_sha256": "d21b4a64a2d8656a0fdf7ab2e89a49164ac504686cfa2a3d442e87c209286330",
+            "following_heading_text_sha256": "614b7817d00ff4e9e42570bd4937766ea922c283f275a854e10357262432b7f9",
+            "visual_evidence": {
+              "path": "artifacts/d9/source_region_review/arxiv_2303.11366v4_page1.png",
+              "sha256": "994317caf3c2f71cc83d66a09f10c841a681702e1dbe748b91000699574b84e9"
+            },
+            "renderer": "Poppler pdftoppm; page selection is for review, not qualification",
+            "segment_bbox_is_exact_chunk_box": false
+          }
+        }
+      ]
+    }
+  ],
+  "review_revision": "d9-source-human-confirmation-v1",
+  "human_review_confirmation": {
+    "path": "artifacts/d9/human_review_confirmation.json",
+    "method": "user_message_overall_confirmation",
+    "confirmed_at_utc": "2026-10-06T05:01:22.700349+00:00"
+  }
+}

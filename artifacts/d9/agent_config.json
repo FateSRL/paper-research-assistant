@@ -1,0 +1,473 @@
+{
+  "schema_revision": "d9-initial-agent-contract-v1",
+  "task": "D9-A",
+  "status": "frozen_for_implementation",
+  "contract_version": "d9-source-scope-deadline-policy-v1",
+  "client_date": "2026-10-06",
+  "timezone": "Asia/Shanghai",
+  "recorded_at_utc": "2026-10-06T04:08:18.778431+00:00",
+  "recorded_at_local": "2026-10-06T12:08:18.778431+08:00",
+  "is_D10_final_evaluation_freeze": false,
+  "configuration_observation": "public_target_inherited_from_saved_D8_record; no_env_read_or_service_check_this_task",
+  "chat": {
+    "provider": "deepseek",
+    "model_id": "deepseek-flash",
+    "base_url": "https://api.deepseek.com",
+    "configured_timeout_seconds": 30.0
+  },
+  "index_profile": {
+    "index_profile_id": "ep_cbf0f6caa97b962a",
+    "recipe_sha256": "cbf0f6caa97b962ad637a0b1a0a704a0eeb990d978247fd6e4bab78d4a4b2e3b",
+    "collection_name": "paper_chunks_ep_cbf0f6caa97b962a",
+    "recipe": {
+      "backend": "dashscope",
+      "model": "qwen3.7-text-embedding",
+      "dimension": 1024,
+      "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "input_mode": "openai-compatible-default",
+      "request_schema": "embeddings-input-array-v1",
+      "encoding_format": "float",
+      "preprocessing": "identity-text-v1",
+      "distance": "cosine"
+    }
+  },
+  "ready_versions": [
+    {
+      "import_key": "i_83e9dcf7bc188e40486b031794f3296744194ff45e80c515ada73669bfc66c62",
+      "paper_id": "arxiv_2005.11401v4",
+      "parse_revision": "r_269ac0cb1263292d",
+      "index_profile_id": "ep_cbf0f6caa97b962a",
+      "status": "ready",
+      "completed_count": 385,
+      "error_summary": null
+    },
+    {
+      "import_key": "i_9933c44b221e13318eaffb4c7c4f261fa5ed68cd287e787538c4dbc15f52c960",
+      "paper_id": "arxiv_2210.03629v3",
+      "parse_revision": "r_22af23d03fcb87a8",
+      "index_profile_id": "ep_cbf0f6caa97b962a",
+      "status": "ready",
+      "completed_count": 480,
+      "error_summary": null
+    },
+    {
+      "import_key": "i_058bc8edb9b62cb359d4de162e0e01b07c9cc6704cb87a33c0f66f31b7ec8e29",
+      "paper_id": "arxiv_2303.11366v4",
+      "parse_revision": "r_d7736b29a2d8b39e",
+      "index_profile_id": "ep_cbf0f6caa97b962a",
+      "status": "ready",
+      "completed_count": 323,
+      "error_summary": null
+    }
+  ],
+  "rules": {
+    "selection_scope": {
+      "min_versions": 1,
+      "max_versions": 3,
+      "full_pairs_required": true,
+      "ready_only": true,
+      "immutable_during_run": true
+    },
+    "retrieval": {
+      "initial_top_k": 5,
+      "retry_top_k": 5,
+      "max_rounds": 2,
+      "max_retry_searches": 1,
+      "embedding_network_retries": 0,
+      "initial_scope": "selected_full_pairs_and_profile",
+      "abstract_retry_scope": "verified_abstract_point_ids_AND_selected_full_pairs_AND_profile",
+      "empty_abstract_point_set": "stop_insufficient_before_embedding_never_use_unrestricted_filter",
+      "ready_count_scope": "entire_selected_version_scope_before_optional_point_filter"
+    },
+    "context": {
+      "max_shown_chunks": 8,
+      "max_body_characters": 8000,
+      "character_unit": "Python len(str)",
+      "full_chunks_only": true,
+      "first_character_overflow_stops": true,
+      "merge_order": "retry_rank_then_initial_rank",
+      "deduplicate_key": "chunk_id",
+      "conflicting_identity_or_text": "tool_error",
+      "cross_query_score_sort": false,
+      "compatible_rank": "continuous_selection_ordinal",
+      "original_round_rank_score": "outer_trace",
+      "count_cap_before_existing_select_context": true,
+      "validate_all_raw_candidates_before_qualification": true,
+      "source_qualification_before_count_and_character_limits": true,
+      "source_metadata_location": "versioned_outer_qualification_sidecar",
+      "raw_retrieval_preserved": true,
+      "source_exclusion_is_physical_no_hits": false
+    },
+    "actions": {
+      "initial_with_evidence": [
+        "answer",
+        "retry_search",
+        "insufficient_evidence"
+      ],
+      "initial_without_shown_evidence": [
+        "retry_search",
+        "insufficient_evidence"
+      ],
+      "after_retry": [
+        "answer",
+        "insufficient_evidence"
+      ],
+      "retry_fields": [
+        "missing_information",
+        "retry_query"
+      ],
+      "missing_information_max_chars": 500,
+      "retry_query_max_chars": 1000,
+      "reason_max_chars": 1000,
+      "strict_types": true,
+      "extra_fields": "forbid",
+      "duplicate_json_keys": "reject",
+      "nonfinite_json": "reject",
+      "extra_output_text": "reject",
+      "raw_retry_query_preserved": true,
+      "whitespace_only_strings": "reject",
+      "comparison_key": "' '.join(query.split()).casefold()",
+      "comparison_key_used_as_request": false,
+      "model_controls_scope_or_limits": false,
+      "evidence_permission_basis": "actual_qualified_shown_evidence",
+      "scope_requirement_immutable_across_retry_and_repair": true
+    },
+    "budget": {
+      "chat_policy": {
+        "temperature": 0.2,
+        "max_tokens": 1200,
+        "request_timeout": 30.0,
+        "max_attempts": 3,
+        "max_network_retries": 1,
+        "max_repairs": 1,
+        "total_timeout": 120.0
+      },
+      "chat_budget_shared_across_all_phases": true,
+      "repairs_shared_across_format_action_citation": true,
+      "sdk_implicit_retries": 0,
+      "http_attempts_recorded_separately": true,
+      "normal_agent_chat_calls": [
+        1,
+        2
+      ],
+      "check_final_chat_capacity_before_retry_embedding": true,
+      "standalone_start": "before_initial_retrieval",
+      "paired_remaining_seconds": "120 - actual_shared_first_retrieval_elapsed",
+      "other_mode_wait_consumes_this_mode_budget": false,
+      "stage_pre_post_deadline_checks": true,
+      "strict_wall_clock_abort_verified": false,
+      "embedding_total_deadline_connected": true,
+      "embedding_request_timeout": "min(30.0, current_remaining_seconds)",
+      "embedding_remaining_callback_recomputed_before_HTTP": true,
+      "embedding_attempt_unit": "actual_HTTP_send_attempt_not_embedder_function_entry",
+      "embedding_request_started_flag_required": true,
+      "unknown_usage": null,
+      "paired_shared_retrieval_deadline_connected": true,
+      "business_commit_point": "standalone_after_own_cleanup_input_recheck_final_deadline; paired_each_mode_after_own_client_cleanup_mode_recheck_final_deadline_before_next_mode",
+      "expired_terminal_status": "budget_exceeded_for_every_terminal_before_business_commit",
+      "interrupted_failure_preserved": true,
+      "export_deadline_role": "independent_after_core_commit_no_retroactive_history_rewrite",
+      "commit_ownership": {
+        "standalone": "all_owned_resources_then_input_recheck_and_all_terminal_deadline_before_export",
+        "paired_mode": "own_client_cleanup_and_mode_input_recheck_and_all_terminal_deadline_before_next_mode",
+        "paired_shared_resources": "runner_batch_finalization_outside_already_committed_mode_deadlines",
+        "batch_finalization_failure": "batch_attention_required_preserve_committed_modes_and_usage",
+        "recheck_committed_mode_deadline_after_other_mode_wait": false
+      }
+    },
+    "stops": {
+      "same_query": {
+        "status": "insufficient_evidence",
+        "reason": "retry_query_unchanged",
+        "retry_executed": false
+      },
+      "no_new_final_shown_ids": {
+        "status": "insufficient_evidence",
+        "reason": "no_new_shown_evidence",
+        "final_chat_executed": false
+      },
+      "retrieval_failure": "tool_error",
+      "invalid_action_after_shared_repair": "invalid_output",
+      "time_or_chat_limit": "budget_exceeded",
+      "no_silent_answer_fallback": true,
+      "ambiguous_source_requirement": {
+        "status": "insufficient_evidence",
+        "reason": "source_constraint_ambiguous",
+        "new_requests": 0
+      },
+      "valid_registry_without_qualified_scope": {
+        "status": "insufficient_evidence",
+        "reason": "source_scope_unavailable",
+        "new_requests": 0
+      },
+      "required_registry_missing_or_invalid": "tool_error",
+      "source_violation_after_remaining_shared_terminal_repair": "invalid_output"
+    },
+    "citations": {
+      "allowed_set": "final_actual_shown_context",
+      "original_question_remains_answer_target": true,
+      "sqlite_text_and_pdf_identity_recheck": true,
+      "repair_cannot_reopen_tools": true,
+      "location_validation_proves_semantic_support": false,
+      "source_scope_check": "every_citation_of_every_claim_after_location_validation_and_after_repair",
+      "source_qualification_proves_semantic_support": false,
+      "unshown_registry_text_can_supply_answer": false
+    },
+    "comparison": {
+      "shared_first_retrieval_snapshot": true,
+      "separate_mode_budgets": true,
+      "actual_batch_and_standalone_logical_costs_separate": true,
+      "old_batches_are_new_paired_baseline": false,
+      "acceptance_runs_before_D11": false,
+      "resume_requires_unchanged_frozen_bindings": true,
+      "AI_and_human_reviews_separate": true
+    },
+    "source_scope": {
+      "requirement_rule_version": "d9-explicit-abstract-constraint-v1",
+      "supported_required_scope": "abstract",
+      "derive_from": "original_user_question_only",
+      "derive_once": true,
+      "requirement_record_fields": [
+        "rule_version",
+        "original_question_sha256",
+        "resolution",
+        "required_scope",
+        "matched_expression"
+      ],
+      "resolution_values": [
+        "explicit",
+        "none",
+        "ambiguous"
+      ],
+      "explicit_examples": [
+        "in the paper's abstract",
+        "in the abstract",
+        "摘要中",
+        "摘要提到"
+      ],
+      "ambiguous_negated_quoted_or_conflicting_requirement": "conservative_insufficient_evidence_no_silent_unrestricted_fallback",
+      "unconstrained_body_question": "existing_evidence_rules_without_abstract_filter",
+      "not_a_general_natural_language_scope_parser": true,
+      "forbidden_online_inputs": [
+        "case_id",
+        "expected_points",
+        "expected_evidence",
+        "answerable",
+        "rubric",
+        "AI_or_human_scores"
+      ],
+      "registry": {
+        "path": "artifacts/d9/source_regions.json",
+        "schema_revision": "d9-source-regions-v1",
+        "document_scope": "three_existing_full_paper_revision_pairs",
+        "binding": "whole_file_sha256_in_each_run_and_prepared_manifest",
+        "required_bindings": [
+          "paper_id",
+          "parse_revision",
+          "pdf_sha256",
+          "parsed_input_sha256",
+          "filtered_input_sha256",
+          "chunk_snapshot_sha256",
+          "segment_id",
+          "source_block_index",
+          "source_line_indices",
+          "segment_char_start",
+          "segment_char_end",
+          "text_sha256"
+        ],
+        "verification_status_values": [
+          "candidate",
+          "verified",
+          "rejected"
+        ],
+        "verification_requires": "original_PDF_and_parse_filter_source_range_comparison_evidence",
+        "verification_method_values": [
+          "AI_structural_review",
+          "human_structural_review"
+        ],
+        "human_review_status_values": [
+          "pending",
+          "confirmed",
+          "rejected"
+        ],
+        "AI_review_is_human_confirmation": false,
+        "required_document_record_missing": "tool_error",
+        "present_but_not_verified": "normal_scope_unavailable",
+        "missing_or_corrupt_required_registry": "tool_error",
+        "state_consistency": {
+          "human_rejected_requires_verification_rejected": true,
+          "verified_and_human_rejected": "tool_error"
+        }
+      },
+      "chunk_coverage_values": [
+        "abstract_full",
+        "body",
+        "mixed",
+        "unknown"
+      ],
+      "eligible_only_if": "verified_source_range_fully_covers_entire_immutable_shown_chunk_AND_human_review_status_is_not_rejected",
+      "page1_keyword_similarity_model_self_label_is_authority": false,
+      "segment_bbox_is_exact_chunk_box": false,
+      "trim_chunk_to_manufacture_scope": false,
+      "per_claim_all_citations_must_be_eligible": true,
+      "model_scope_violation": "terminal_shared_repair_if_available_then_invalid_output_no_answer",
+      "registry_or_identity_damage": "tool_error_never_model_repair",
+      "retrieved_body_only_fixed_rag": "insufficient_evidence_one_retrieval_no_answer_chat_needed",
+      "retrieved_body_only_agent": "initial_retry_search_or_insufficient_evidence_not_answer",
+      "scope_retry_with_no_qualified_final_shown": "insufficient_evidence_no_third_retrieval"
+    },
+    "record_stage": {
+      "controlled_values": [
+        "d8",
+        "d9"
+      ],
+      "default_stage": "d8",
+      "D9_requires_explicit_stage": true,
+      "D9_schema_revision": "d9-initial-agent-contract-v1",
+      "D9_policy_path": "artifacts/d9/agent_config.json",
+      "D9_latest_root": "artifacts/d9",
+      "D9_history_root": "archive/run_logs/d9",
+      "D9_comparison_root": "artifacts/d9/comparison",
+      "D9_runtime_report_task": "D9",
+      "D9_policy_and_registry_explicitly_protected": true,
+      "no_automatic_D8_prepared_migration": true,
+      "new_code_policy_or_registry_requires_new_manifest": true,
+      "four_case_and_full_twenty_case_batches_separate": true
+    }
+  },
+  "policy_sha256": "fe07c5fce41646749aa83703904f32132d7ac62f871b9facfef640a47e1adf76",
+  "digest_recipe": "SHA256(JSON ensure_ascii=False sort_keys=True separators=(comma,colon) allow_nan=False UTF8)",
+  "observed_implementation_at_A": {
+    "D8_agent_core": "implemented_in_recorded_scope",
+    "D9_source_registry_created": false,
+    "D9_source_scope_enforced": false,
+    "D9_embedding_remaining_deadline_connected": false,
+    "D9_stage_runtime_or_CLI_connected": false,
+    "D9_page_connected": false,
+    "current_runtime_accepts_this_schema": false,
+    "strict_wall_clock_abort_verified": false
+  },
+  "capability_claim_rule": "rules are implementation requirements; observed_implementation_at_A is actual A-stage state; never report target rules as implemented",
+  "interface_contracts": {
+    "source_requirement": {
+      "planned_function": "identify_source_requirement(original_question)",
+      "output": "immutable requirement record; no eval labels; ambiguous stops conservatively",
+      "implementation_task": "B"
+    },
+    "qualified_context": {
+      "planned_function": "prepare_scoped_context(search_result, requirement, verified_registry, *, max_chars=8000)",
+      "output": "context retains old strict evidence fields; qualification outer sidecar preserves registry hash, original ranks, all raw counts, excluded reasons, eligible and shown IDs",
+      "implementation_task": "B"
+    },
+    "citation_scope_gate": {
+      "planned_function": "validate_citation_scope(answer, context, qualification, verified_registry)",
+      "input_gate": "location validation first, then every actual citation source eligibility; recheck after repair",
+      "implementation_task": "B"
+    },
+    "search": {
+      "current": "search_evidence(query, selected_versions, top_k=5)",
+      "planned": "search_evidence(query, selected_versions, top_k=5, *, allowed_point_ids=None, remaining_seconds=None)",
+      "compatibility": "old three arguments unchanged; None means legacy no extra point filter; empty verified scope stops outside Searcher, never coerces to None; point IDs only constructed by program",
+      "implementation_task": "B/C"
+    },
+    "embedding": {
+      "current": "embed_texts(texts, settings)",
+      "planned": "embed_texts(texts, settings, *, remaining_seconds=None, request_timeout=30.0)",
+      "compatibility": "old two arguments keep fixed 30s; explicit adapter for legacy custom embedders; never catch TypeError and resend; safe attempt metadata on result/error",
+      "attempt_metadata": [
+        "request_started",
+        "embedding_requests",
+        "failed_requests",
+        "total_tokens",
+        "request_timeout_seconds"
+      ],
+      "implementation_task": "C"
+    },
+    "runtime_and_export": {
+      "planned": "controlled stage=d8|d9 default d8 across standalone, paired, CLI and pure export adapters",
+      "compatibility": "D8 policy/schema/namespace remain identifiable; D9 policy and source registry explicitly included in bindings; session download does not rerun",
+      "implementation_task": "E"
+    }
+  },
+  "upstream_bindings": {
+    "D8_config": {
+      "path": "artifacts/d8/agent_config.json",
+      "sha256": "69a6c81e39d0da7b0247c83b41cc77688c89ba8b4d46f24d9a90d4bfc56d41cc",
+      "policy_sha256": "201776ec0e0b835a7d95efc127b65ba159da6fde0765b530425976e637a74bd4"
+    },
+    "D8_G": {
+      "path": "artifacts/d8/task_g.json",
+      "sha256": "f57a4e137ef7f7ca590f3f327d2bb0a28a2e2c02ef7ae26ee855c7b751cb1ba6"
+    },
+    "D9_plan_at_A_start": {
+      "path": "docs/d9/d9-ABCDEFG-plan.md",
+      "sha256": "dbba60e7f2e52a8bb11998c7b5d4962a63d33a6b5a2c129b9b83ef95b8849721",
+      "backup": "archive/planning_snapshots/d9_task_a_20261006_040641_795424/docs/d9/d9-ABCDEFG-plan.md"
+    }
+  },
+  "baseline_source_sha256": {
+    "paper_assistant/agent.py": "5cdec8fcee2a109f0ef50ec4ff0093f62fdc72ae90f92bdcafcdd52a30b191ee",
+    "paper_assistant/agent_actions.py": "968e94a620c7cef05aec37b3f9b85c4ddf755abd1190940d014c7ec8213a57d9",
+    "paper_assistant/agent_context.py": "016ea58c79773920ebc92677c4bf719218f1a7aeee162d53d05442c2b02484bb",
+    "paper_assistant/agent_prompt.py": "553b7fc0573ef72126a677ed8a9987c89369e7d4b326a8239ce2f54814e7ce3e",
+    "paper_assistant/agent_records.py": "107d329463cb2c3d69a683ad400e4fb15a4339557fed5d5bf111d5a48e39353f",
+    "paper_assistant/agent_export.py": "b6b9538419cc8fd78c5f566039f77a30074775b0bdcc30ae8a3b9d6437959a1d",
+    "paper_assistant/agent_runtime.py": "db0e65e3546f82b24bef63806b8657200753288c526db662e14bb739f7dc5aa4",
+    "paper_assistant/answer_export.py": "217227e4ee8d41960d87e572e9c83f08e0bf016f58a70c5182670609255cdbd8",
+    "paper_assistant/citations.py": "536772f93327b84cd05efba1292f502c1a0eec15601c321b201272fc6df6a284",
+    "paper_assistant/config.py": "3e4d3fbec637451dc18c069e7ceaa6d8cf765615f8e41addcfe0116c0c9311c1",
+    "paper_assistant/context.py": "93c6e71ddf5042fea2c3db31b0672c8370c63e933f84fa0f9b55a4d8113dce19",
+    "paper_assistant/embedding_client.py": "da29a8a1eedd4ff94abf7371156430fa5946ee13ea8048648c2b42b4e70f1afc",
+    "paper_assistant/indexing.py": "3af9181591934e7413cef2f4066e414b196d439e9850b60ed153f54e3fa5f84c",
+    "paper_assistant/llm_client.py": "72527427e5be087e71bd1725acc3e728c84a3f9e6b4e3e5fc6d8fe4fd7efdef1",
+    "paper_assistant/retrieval.py": "fadb6fa9b90e08c41202fd1091e6d4f7d1b8eb6e8c548b1c91e17eaeac1868e6",
+    "paper_assistant/schemas.py": "825fff8fe1a22412b355e9405d9acf4bbe49cac4e673e7fce13d8b0cd13dd3c7",
+    "paper_assistant/search.py": "c3204fe87de4711aaaad948c9f3220920527c4155bf66e432eba8ee39029e6a0",
+    "paper_assistant/storage.py": "4a576664ff9946aab9480838e8016dd2fae69ad778945963fe3176da5056fe8e",
+    "scripts/answer_question_agent.py": "f7e9c0ff255346dc2782fc9f1f3beb33665322ce9e3644adda07e3fc5a3369a3",
+    "requirements.txt": "7ad4332068be812e4da51ff0d09cea043049465649578213364ffb0cbbe126df",
+    "scripts/check_agent_cli.py": "59c24c5af7a0eea45695674ad31203a211e0041faf61a9af62957d78f9b811ab",
+    "scripts/check_agent.py": "20d31d6f40fcec5aa64f9cef8b626130d7b97c1a6ea9b16d6e69f9b26618c6ca",
+    "scripts/check_llm.py": "965031dbde4dc8c9eb8ec3df981d78d2eb648944723073bd9aace67bd1c0a98d",
+    "scripts/check_rag.py": "521cea5a25017c8500481b98a5231e7089da037ec84f5ffd076fae9af4d5989b",
+    "paper_assistant/agent_comparison.py": "c1e786e91627e3a8ca5a2ca6aebe29451b14f67174aac1d1ae2d0941aeb769f3",
+    "paper_assistant/agent_evaluation.py": "86b73aa9c5a98ef836c84cc9f83a7084e9f918130200c60ddbecb630d3721777",
+    "paper_assistant/rag.py": "4ce1b5782ea3d3a48e815ea7a52ccf4c35bbeaf4b6567daef384c5bc9554a58c",
+    "paper_assistant/evaluation.py": "1c69036747429125941d5f4fb0128e42978e9f7852a02574495c8e7a45ec0119",
+    "paper_assistant/generation.py": "4e53e1a8d552c6a1f961be2ebaa4dab662936bb3d77a67a81697737ade936857",
+    "scripts/run_agent_comparison.py": "68f7a4a5d22e4dfa78c612ecbab5c4ab9aa8f8c0b8b893f823344ec5c39524fd",
+    "scripts/run_retrieval_comparison.py": "2be269b09a0bc1407c4c184abe8c7b1ae847aaaf41bb42e342ceabed1a842357",
+    "scripts/check_generation.py": "719aec9286af016a489b7f6c2a348b351084e8051b7d43816a25bb656e33bc8e",
+    "scripts/check_agent_comparison.py": "3934ff40a35607ed560903808f2f78a0b2bccc38139de7a5b723c9c693b07ab4",
+    "scripts/check_agent_evaluation.py": "d585179bfa403bd3fa0581768047f961fb7ded713eeb0804ba07892c67483346",
+    "scripts/agent_boundary_records.py": "ed9b948b4aed7b6fcd65fa35bc956bc1eb4f5679211854fb6ded0684e724bf59",
+    "scripts/check_agent_export_modes.py": "ff52ef5acee55b10c40f101400064d8c81a321ddf10fc4bdf23ef39fd1f8390a",
+    "scripts/build_d8_f_review_package.py": "c91c8d12f06d0e6651a08b09dcfa658c4da91201bbf6fa40f366bfc74a048f5c",
+    "scripts/check_agent_actions.py": "1ccc6d38f3a1de1a4d00e54439f3c9dd3592887043ce2f0b5557e7daedcbe562",
+    "scripts/agent_boundary_actions.py": "bf0ded275d26cd31555baa5afc665696d103457ed05b0f6d07f826c07f7a9387",
+    "scripts/agent_boundary_evidence.py": "0764e37a47b109590292e3cc8029454f5b492de371ad6f51517f96ca7c64f262",
+    "scripts/check_agent_boundaries.py": "f6bcb9164a97089d0edca3159e537d259621545d677786c9d7737ab9a5bae7d5",
+    "archive/run_logs/d8/g_boundary_regression_20261005_130251_519619.py": "d48eb7cb92ac33b3fb65bfe0f9e566ea2b86c61d2b8a7f6bf921ee6fee89f01c",
+    "app.py": "5022bd36fe5783b42a37616578d87c23822d8031db7584c8a681d53353a86691",
+    "paper_assistant/web_runtime.py": "cd52221def61759ce2cf463c614f22a63dbf7b34e9b48e84e7215bc877611382"
+  },
+  "preservation_snapshot": "archive/planning_snapshots/d9_task_a_20261006_040641_795424/manifest.json",
+  "user_scope_rule": {
+    "source": "direct_user_message_2026-10-06",
+    "questions": [
+      "用户让你做了吗？",
+      "结果需要它吗？",
+      "有证据吗？",
+      "没它会失败吗？"
+    ],
+    "application": "apply before every action; the current authorized task and its necessary routine steps remain authorized without repeated permission; do not extend work solely because it may help"
+  },
+  "change_rule": "Keep this A contract as stage history. Any contract change must be versioned and backed up; runtime and experimental freeze bind the actual current strategy plus registry hashes. Do not overwrite D8 records or reuse drifting prepared batches.",
+  "project_API_requests_this_task": {
+    "embedding": 0,
+    "chat": 0
+  },
+  "acceptance_executed": false,
+  "acceptance_content_used": false,
+  "secrets_saved": false
+}
