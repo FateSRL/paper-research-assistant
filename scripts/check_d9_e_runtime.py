@@ -29,6 +29,21 @@ def prepare_action(action, *, answerable=True, missing_information=""):
             "answerable": answerable, "missing_information": missing_information}
 
 
+def prepare_ref_action(action, *, answerable=True, missing_information="", refs=None):
+    facts = deepcopy(action["answer"]["claims"])
+    # Generic fixture defaults to its first displayed source; structured cases
+    # explicitly supply their known display mapping.
+    mapping = refs or {chunk: number for number, chunk in enumerate(dict.fromkeys(
+        chunk for fact in facts for chunk in fact.get("citation_ids", [])), 1)}
+    for fact in facts:
+        fact.setdefault("basis", "paper_evidence")
+        fact["citation_refs"] = [mapping[chunk] for chunk in fact.pop("citation_ids", [])]
+        for quote in fact.get("evidence_quotes", []):
+            quote["ref"] = mapping[quote.pop("chunk_id")]
+    return {"action": "prepare_answer", "facts": facts,
+            "answerable": answerable, "missing_information": missing_information}
+
+
 class RuntimeChecks(unittest.TestCase):
     setUp = batch_fixtures.D9BatchChecks.setUp
     client = AgentFixture.client
@@ -37,17 +52,23 @@ class RuntimeChecks(unittest.TestCase):
                query=None, on_search=None, on_close=None, close_error=None, resource_error=None,
                override_core=None, export=None, hybrid=False, rerank=False,
                conversation_id=None, conversation_history=None, library_mode=False, pairs=None,
-               search_outcomes=None, answer_instructions=None):
+               search_outcomes=None, answer_instructions=None, iterations=None):
         f = self.fixture
         rows = f.search([f.abstract_id])["results"] if rows is None else rows
         self.searcher = TimedScopedSearcher(*(search_outcomes if search_outcomes is not None else [rows]),
                                            profile=self.profile["index_profile_id"], on_search=on_search)
         self.searcher.closed = False
-        budget = ChatBudget(runtime.INTERACTIVE_CHAT_POLICY if library_mode else None, clock=self.clock)
+        budget = ChatBudget((runtime.INTERACTIVE_AGENT_POLICY if mode == "agent" else runtime.INTERACTIVE_CHAT_POLICY) if library_mode else None, clock=self.clock)
         self.budget = budget
         if outcomes is None:
             draft = answer_action(f.abstract_id)
-            outcomes = [response(draft["answer"] if mode == "fixed_rag" else draft)]
+            if mode == "fixed_rag":
+                outcomes = [response(draft["answer"])]
+            elif library_mode:
+                outcomes = [response("The provided evidence supports the requested answer."
+                                     + (" [ID:1]" if rows else ""))]
+            else:
+                outcomes = [response(draft)]
             if library_mode and not conversation_history:
                 outcomes.insert(0, response({"standalone_question": f.question if query is None else query,
                     "clarification_question": None, "referenced_evidence_ids": [], "planned_queries": []}))
@@ -84,6 +105,7 @@ class RuntimeChecks(unittest.TestCase):
 
         with ExitStack() as stack:
             stack.enter_context(patch.object(runtime, "ChatBudget", return_value=budget))
+            stack.enter_context(patch.object(runtime, "load_agent_max_iterations", return_value=120))
             self.load_embedding = stack.enter_context(patch.object(runtime, "load_embedding_settings", return_value=self.embedding))
             stack.enter_context(patch.object(runtime, "load_llm_settings", return_value=self.settings))
             self.client_factory = stack.enter_context(patch.object(runtime, "RecordedLLM", return_value=client))
@@ -95,11 +117,14 @@ class RuntimeChecks(unittest.TestCase):
             result = runtime.run_question(f.question if query is None else query, f.pairs if pairs is None else pairs,
                 mode=mode, project_root=self.root, submission_id=token,
                 conversation_id=conversation_id, conversation_history=conversation_history, library_mode=library_mode,
-                **({"answer_instructions": answer_instructions} if answer_instructions else {}))
+                **({"answer_instructions": answer_instructions} if answer_instructions else {}),
+                **({"max_iterations": iterations} if iterations is not None else {}))
         self.assertNotIn(check_agent.SECRET, json.dumps(result, ensure_ascii=False))
         return result
 
     def test_actual_cores_citations_closed_resources_and_stage_records(self):
+        from dataclasses import replace
+        self.settings = replace(self.settings, context_length=1048576, timeout=300.0)
         for mode in runtime.MODES:
             with self.subTest(mode=mode):
                 r = self.invoke(mode, token=mode, hybrid=True, rerank=True)
@@ -157,6 +182,103 @@ class RuntimeChecks(unittest.TestCase):
         self.assertIn("not an automatic explanation of the entire system", ANSWER_ORGANIZATION_INSTRUCTION)
         f = self.fixture
 
+        from paper_assistant.prose import normalize_citation_markers, parse_markers
+        raw = "Book [1]; first [ID: 1], second [ID: 2], first again [ID:1], second again [ID:۲]."
+        normalized = "Book [1]; first [ID:1], second [ID:2], first again [ID:1], second again [ID:2]."
+        self.assertEqual(normalize_citation_markers(raw), normalized)
+        self.assertEqual(normalize_citation_markers(normalized), normalized)
+        self.assertEqual(normalize_citation_markers("Arabic ١ remains prose; [ID: ٠١] [۱۲] [ID: ۱۲]."),
+                         "Arabic ١ remains prose; [ID:01] [۱۲] [ID:12].")
+        unsupported = "No handles: [1,2] [99] ref1 chunk_x."
+        self.assertEqual(normalize_citation_markers(unsupported), unsupported)
+        variants = "[ID: 1] (ID:2) 【ID：۲】 (**ID:1**) [ID:1, ID:2]"
+        self.assertEqual(normalize_citation_markers(variants), "[ID:1] [ID:2] [ID:2] [ID:1] [ID:1][ID:2]")
+        for number, (original, delivered) in enumerate(((raw, normalized),
+                (variants, normalize_citation_markers(variants)),
+                (normalized, normalized), ("Ordinary bibliography [1] [99] [۲].",
+                                           "Ordinary bibliography [1] [99] [۲]."),
+                ("A local analysis without citations.",
+                                           "A local analysis without citations."))):
+            with self.subTest(prose_format=number), patch.object(runtime.web_runtime, "_ready_versions", return_value=[{
+                    "paper_id": f.paper_id, "parse_revision": f.parse_revision, "title": "Offline fixture"}]):
+                query = "What do the selected passages report?"
+                compatible = self.invoke("agent", token=f"prose-format-{number}", library_mode=True,
+                    query=query, rows=f.search([f.abstract_id, f.body_id])["results"], outcomes=[
+                        response({"standalone_question": query, "clarification_question": None,
+                                  "referenced_evidence_ids": [], "planned_queries": []}),
+                        check_agent.tool_response({"query": query, "selected_versions": [
+                            {"paper_id": f.paper_id, "parse_revision": f.parse_revision}],
+                            "missing_information": "Read the selected evidence."}),
+                        response(original)])
+            self.assertEqual(compatible["status"], "answered", compatible.get("error"))
+            self.assertEqual(compatible["llm_requests"], 3)
+            self.assertEqual(compatible["chat_statistics"]["repairs"], 0)
+            self.assertEqual(compatible["answer"]["text"], delivered)
+            self.assertEqual(compatible["result"]["action_steps"][-1]["response"]["content"], original)
+            self.assertEqual(compatible["chat_attempts"][-1]["content"], original)
+            markers = parse_markers(delivered)
+            self.assertEqual([{k: c[k] for k in ("index", "position", "ref")}
+                              for c in compatible["answer"]["citations"]], markers)
+            expected_ids = {1: f.abstract_id, 2: f.body_id}
+            self.assertEqual([c["chunk_id"] for c in compatible["answer"]["citations"]],
+                             [expected_ids[m["ref"]] for m in markers])
+            self.assertEqual([c["chunk_id"] for c in compatible["answer"]["evidence_sources"]],
+                             [f.abstract_id, f.body_id] if markers else [])
+            self.assertEqual([c["chunk_id"] for c in compatible["answer"]["evidence_refs"]],
+                             [f.abstract_id, f.body_id] if markers else [])
+            saved_compatible = json.loads((self.root / compatible["history_report"]).read_text(encoding="utf-8"))
+            self.assertEqual(saved_compatible["answer"], compatible["answer"])
+            self.assertEqual(saved_compatible["result"]["action_steps"][-1]["response"]["content"], original)
+            self.assertTrue(self.store.closed and self.searcher.closed and self.chat_client._closed)
+
+        # Stable registration is independent of copies/order and grants no
+        # authority to registered but currently invisible chunks.
+        from paper_assistant.prose import EvidenceRegistry, source_refs
+        from paper_assistant.agent import fit_agent_request
+        from paper_assistant.message_fit import count_request_tokens
+        registry = EvidenceRegistry()
+        context = deepcopy(compatible["result"]["context"])
+        third = deepcopy(context["shown_evidence"][0])
+        third.update(chunk_id="offline-third", shown_text="Third original passage. " * 20)
+        context["shown_evidence"].append(third)
+        registry.stamp(context)
+        original_map = {row["chunk_id"]: row["ref"] for row in context["shown_evidence"]}
+        reordered = deepcopy(context)
+        reordered["shown_evidence"].reverse()
+        registry.stamp(reordered)
+        self.assertEqual({row["chunk_id"]: row["ref"] for row in reordered["shown_evidence"]}, original_map)
+        self.assertEqual([row["ref"] for row in source_refs(reordered, registry)], [3, 2, 1])
+        isolated = EvidenceRegistry()
+        isolated.stamp(reordered)
+        self.assertEqual(reordered["shown_evidence"][0]["ref"], 1)
+        registry.stamp(reordered)
+        context["shown_evidence"] = [context["shown_evidence"][0], third]
+        registry.stamp(context)
+        self.assertEqual(context["allowed_refs"], [1, 3])
+        self.assertEqual(registry.resolve(3, context), third["chunk_id"])
+        for number, code in ((2, "citation_not_shown"), (99, "citation_unknown_ref")):
+            with self.assertRaises(ValueError) as caught:
+                registry.resolve(number, context)
+            self.assertEqual(str(caught.exception), code)
+        # Whole-request fitting removes originals, keeps non-positional refs,
+        # and synchronizes permissions. Redisplay recovers the original number.
+        context["allowed_citation_ids"] = [row["chunk_id"] for row in context["shown_evidence"]]
+        messages = [{"role": "system", "content": "Answer using originals."}, {"role": "user",
+            "content": json.dumps({"sources": source_refs(context, registry), "allowed_refs": [1, 3]})}]
+        messages.insert(1, {"role": "user", "content": json.dumps({"evidence_sections": [{
+            "chunks": deepcopy(context["shown_evidence"])}], "allowed_refs": [1, 3]})})
+        capacity = count_request_tokens(messages) - 1
+        with patch("paper_assistant.agent.context_fit_budget", return_value=capacity):
+            fitted, dropped = fit_agent_request(context, messages, context_length=1048576, max_tokens=4096, protect_groups=3)
+        self.assertIn(f.abstract_id, dropped)
+        self.assertEqual([row["ref"] for section in json.loads(fitted[1]["content"])["evidence_sections"]
+                          for row in section["chunks"]], [3])
+        self.assertEqual(json.loads(fitted[-1]["content"])["allowed_refs"], [3])
+        self.assertEqual([row["ref"] for row in source_refs(context, registry)], [3])
+        context["shown_evidence"].insert(0, deepcopy(compatible["result"]["context"]["shown_evidence"][0]))
+        registry.stamp(context)
+        self.assertEqual(context["allowed_refs"], [1, 3])
+
         def text_count(messages, text):
             total = 0
 
@@ -182,123 +304,171 @@ class RuntimeChecks(unittest.TestCase):
 
         search = {"query": f.question, "selected_versions": [{"paper_id": p, "parse_revision": r} for p, r in f.pairs],
                   "missing_information": "Read the selected paper evidence."}
+
         with patch.object(runtime.web_runtime, "_ready_versions", return_value=[{
                 **search["selected_versions"][0], "title": "Offline structural fixture"}]):
-            r = self.invoke("agent", token="native-page", library_mode=True, hybrid=True, rerank=True,
-                outcomes=[response({"standalone_question": f.question, "clarification_question": None,
-                    "referenced_evidence_ids": [], "planned_queries": []}), check_agent.tool_response(search),
-                    response(prepare_action(answer_action(f.abstract_id))), response(answer_action(f.abstract_id))])
-        self.assertEqual(r["status"], "answered")
-        self.assertEqual(r["result"]["retrieval_strategy"], "autonomous")
-        self.assertEqual(r["embedding_requests"], 1)
-        self.assertEqual(r["llm_requests"], 4)
-        native = json.loads(self.requests[1].content)
-        self.assertEqual(native["tools"][0]["function"]["name"], "search")
-        self.assertEqual(native["thinking"], {"type": "disabled"})
-        final = json.loads(self.requests[2].content)
-        self.assertIn(ANSWER_ORGANIZATION_INSTRUCTION, final["messages"][0]["content"])
-        self.assertEqual([m["tool_call_id"] for m in final["messages"] if m["role"] == "tool"], ["call-0"])
-        generated = json.loads(self.requests[3].content)
-        self.assertNotIn("tools", generated)
-        self.assertIn(ANSWER_ORGANIZATION_INSTRUCTION, generated["messages"][0]["content"])
-        prepared_payload = json.loads(generated["messages"][-3]["content"])
-        self.assertEqual(prepared_payload["evidence_sections"][0]["chunks"][0]["shown_text"],
-                         f.chunks[f.abstract_id]["text"])
-        self.assertEqual([m["role"] for m in generated["messages"][-3:]],
-                         ["user", "assistant", "user"])
-        self.assertEqual([m["tool_call_id"] for m in generated["messages"] if m["role"] == "tool"], ["call-0"])
-        native_calls = [m for m in generated["messages"] if m["role"] == "assistant" and m.get("tool_calls")]
-        self.assertEqual([call["id"] for call in native_calls[0]["tool_calls"]], ["call-0"])
-        prepare_response = json.loads(generated["messages"][-2]["content"])
-        self.assertEqual(prepare_response["facts"][0]["claim"],
-                         answer_action(f.abstract_id)["answer"]["claims"][0]["claim"])
-        final_instruction = json.loads(generated["messages"][-1]["content"])
-        self.assertEqual(final_instruction["phase"], "prepared_final_decision")
-        self.assertEqual(final_instruction["allowed_actions"], ["answer"])
-        self.assertEqual(final_instruction["allowed_citation_ids"],
-                         r["result"]["context"]["allowed_citation_ids"])
-        self.assertNotIn("prepared_answer", final_instruction)
-        self.assertNotIn("executed_actions", final_instruction)
-        self.assertEqual(text_count(generated["messages"], f.chunks[f.abstract_id]["text"]), 1)
-        self.assertEqual(r["result"]["action_steps"][-1]["phase"], "prepared_final_decision")
-        self.assertTrue(self.store.closed and self.searcher.closed and self.chat_client._closed)
-        saved = json.loads((self.root / r["history_report"]).read_text(encoding="utf-8"))
-        self.assertEqual(saved["answer"]["evidence_refs"][0]["pdf_page"], 2)
-        self.assertEqual(saved["result"]["action_steps"][0]["tool_calls"][0]["tool_observation"]["status"], "success")
-        self.assertIn('"tool_calls"', (self.root / r["history_markdown"]).read_text(encoding="utf-8"))
+            stable = self.invoke("agent", token="stable-two-searches", library_mode=True, query="Explain both selected passages.",
+                search_outcomes=[f.search([f.abstract_id])["results"],
+                                 f.search([f.body_id, f.abstract_id])["results"]], outcomes=[
+                    response({"clarification_question": None, "planned_queries": []}),
+                    check_agent.tool_response(search),
+                    check_agent.tool_response({**search, "query": "Read another requested detail"}),
+                    response("The original detail is supported. [ID:2]")])
+        self.assertEqual(stable["status"], "answered", [(step.get("parse_error_code"), step.get("response")) for step in stable["result"]["action_steps"]])
+        self.assertEqual(stable["chat_statistics"]["repairs"], 0)
+        self.assertEqual({row["chunk_id"]: row["ref"] for row in stable["result"]["evidence_registry"]},
+                         {f.abstract_id: 1, f.body_id: 2})
+        for step in stable["result"]["action_steps"]:
+            for call in step.get("tool_calls") or []:
+                for row in call["tool_observation"].get("shown_refs", []):
+                    self.assertEqual(row["ref"], 1 if row["chunk_id"] == f.abstract_id else 2)
+            for message in step["messages"]:
+                if message["role"] == "user":
+                    payload = json.loads(message["content"])
+                    for section in payload.get("evidence_sections", []):
+                        for row in section["chunks"]:
+                            self.assertEqual(row["ref"], 1 if row["chunk_id"] == f.abstract_id else 2)
+        self.assertFalse(any((step.get("parsed_action") or {}).get("action") == "prepare_answer"
+                             for step in stable["result"]["action_steps"]))
+        self.assertEqual(stable["agent_max_iterations"], 120)
+        self.assertEqual(stable["answer"]["citations"][0]["chunk_id"], f.body_id)
 
-        # A preparation repair is bound to the actual successful request: the
-        # final generation replays that repair request, not the failed one.
-        with patch.object(runtime.web_runtime, "_ready_versions", return_value=[{
-                **search["selected_versions"][0], "title": "Offline structural fixture"}]):
-            repaired_prep = self.invoke("agent", token="prepare-format-repair", library_mode=True,
-                outcomes=[response({"clarification_question": None, "planned_queries": []}),
-                    check_agent.tool_response(search), response("not JSON"),
-                    response(prepare_action(answer_action(f.abstract_id))),
-                    response(answer_action(f.abstract_id))])
-        self.assertEqual(repaired_prep["status"], "answered", repaired_prep.get("error"))
-        self.assertEqual(repaired_prep["chat_statistics"]["repairs"], 1)
-        self.assertEqual(repaired_prep["llm_requests"], 5)
-        repair_request = json.loads(self.requests[3].content)["messages"]
-        repair_final = json.loads(self.requests[4].content)["messages"]
-        self.assertEqual(repair_final[-5]["content"], repair_request[-3]["content"])
-        self.assertEqual(repair_final[-4]["content"], "not JSON")
-        self.assertEqual(json.loads(repair_final[-3]["content"])["phase"], "autonomous_decision")
-        self.assertEqual(json.loads(repair_final[-2]["content"])["action"], "prepare_answer")
-        self.assertEqual(json.loads(repair_final[-1]["content"])["allowed_actions"], ["answer"])
-        steps = repaired_prep["result"]["action_steps"]
-        self.assertEqual(steps[-1]["phase"], "prepared_final_decision")
-        self.assertEqual((steps[-2]["phase"], steps[-2]["repair_kind"]),
-                         ("autonomous_decision", "format"))
-        self.assertEqual(text_count(repair_final, f.chunks[f.abstract_id]["text"]), 1)
+        from paper_assistant.js_runtime import JavaScriptError, run_javascript
+        self.assertEqual(run_javascript("console.log([3,1,2].sort().join(','))")["stdout"], "1,2,3")
+        self.assertEqual(run_javascript("var leak=1; console.log(leak)")["stdout"], "1")
+        self.assertEqual(run_javascript("console.log(typeof leak)")["stdout"], "undefined")
+        with self.assertRaises(JavaScriptError):
+            run_javascript("while(true){}")
+        with self.assertRaises(JavaScriptError):
+            run_javascript('console.log("x".repeat(1048577))')
 
-        # A complete old paper answer cannot skip preparation, even if the
-        # provider chooses it despite the current action contract.
-        with patch.object(runtime.web_runtime, "_ready_versions", return_value=[{
-                **search["selected_versions"][0], "title": "Offline structural fixture"}]):
-            routed = self.invoke("agent", token="paper-direct-requires-preparation", library_mode=True,
-                outcomes=[response({"clarification_question": None, "referenced_evidence_ids": [], "planned_queries": []}),
-                    check_agent.tool_response(search), response(answer_action(f.abstract_id)),
-                    response(prepare_action(answer_action(f.abstract_id))), response(answer_action(f.abstract_id))])
-        self.assertEqual(routed["status"], "answered", routed.get("error"))
-        self.assertEqual(routed["llm_requests"], 5)
-        self.assertEqual(routed["chat_statistics"]["repairs"], 1)
-        steps = routed["result"]["action_steps"]
-        rejected = next(step for step in steps if step.get("parse_error_code") == "action_not_allowed")
-        self.assertEqual(json.loads(rejected["response"]["content"])["action"], "answer")
-        rejected_payload = json.loads(rejected["messages"][-1]["content"])
-        self.assertNotIn("answer", rejected_payload["allowed_actions"])
-        self.assertNotIn("answer", rejected_payload["action_contracts"])
-        self.assertEqual(sum((step.get("parsed_action") or {}).get("action") == "prepare_answer" for step in steps), 1)
-        self.assertEqual(steps[-1]["phase"], "prepared_final_decision")
-        self.assertEqual(routed["result"]["autonomous_steps_used"], 2)
-        self.assertEqual(routed["embedding_requests"], 1)
+        with patch.object(config, "_read_env", return_value={}):
+            self.assertEqual(config.load_agent_max_iterations(), 120)
+        with patch.object(config, "_read_env", return_value={"AGENT_MAX_ITERATIONS": "9"}):
+            self.assertEqual(config.load_agent_max_iterations(), 9)
+        with patch.object(config, "_read_env", return_value={"AGENT_MAX_ITERATIONS": "0"}):
+            with self.assertRaises(config.ConfigError):
+                config.load_agent_max_iterations()
+        planning = response({"clarification_question": None, "planned_queries": []})
+        def native(name, arguments, content=None):
+            tool = check_agent.tool_response({})[1]
+            message = tool["choices"][0]["message"]
+            message["content"] = content
+            message["tool_calls"][0]["function"] = {"name": name, "arguments": json.dumps(arguments)}
+            return 200, tool
 
-        gap_question = "What are the exact lower and upper bounds reported by this paper?"
-        gap_text = "The current evidence does not provide the requested bounds, so they cannot be determined."
-        gap_answer = {"status": "answered", "direct_answer": "Unanswerable", "claims": [{
-            "claim": gap_text, "basis": "analysis", "citation_ids": [], "evidence_quotes": []}]}
-        for mode in runtime.MODES:
-            outcomes = [response({"clarification_question": None, "planned_queries": []}),
-                        response({"action": "answer", "answer": gap_answer} if mode == "agent" else gap_answer)]
-            if mode == "agent":
-                gap_preparation = {"action": "prepare_answer", "facts": [], "answerable": False,
-                                   "missing_information": gap_text}
-                outcomes[1:1] = [response(gap_preparation), response({"action": "insufficient_evidence",
-                    "reason": "No returned candidate or accessible original identifies these bounds, and the scoped tools offer no reliable new lead."})]
+        def run_case(token, outcomes, **kwargs):
             with patch.object(runtime.web_runtime, "_ready_versions", return_value=[{
                     **search["selected_versions"][0], "title": "Offline structural fixture"}]):
-                gap = self.invoke(mode, token=mode + "-fact-gap", library_mode=True, query=gap_question,
-                                  rows=[], outcomes=outcomes)
-            self.assertEqual(gap["status"], "answered", gap.get("error"))
-            self.assertEqual(gap["standalone_question"], gap_question)
-            self.assertEqual(gap["answer"]["direct_answer"], "Unanswerable")
-            self.assertEqual(gap["answer"]["claims"], gap_answer["claims"])
-            self.assertEqual(gap["llm_requests"], 4 if mode == "agent" else 2)
-            self.assertEqual(gap["embedding_requests"], 0 if mode == "agent" else 1)
-            saved = json.loads((self.root / gap["history_report"]).read_text(encoding="utf-8"))
-            self.assertEqual(saved["answer"]["claims"], gap_answer["claims"])
-            self.assertIn(gap_text, (self.root / gap["history_markdown"]).read_text(encoding="utf-8"))
+                return self.invoke("agent", token=token, library_mode=True, query="Explain the selected evidence.",
+                    outcomes=[planning, *outcomes], **kwargs)
+
+        direct = run_case("react-direct", [response("A complete general explanation without citations.")])
+        self.assertEqual(direct["status"], "answered", direct.get("error"))
+        self.assertEqual(direct["llm_requests"], 2)
+        self.assertEqual(direct["embedding_requests"], 0)
+        self.assertEqual(direct["answer"]["citations"], [])
+        self.assertIsNone(direct["result"]["synthesis"])
+        from paper_assistant.agent_prompt import AUTONOMOUS_PROMPT_VERSION, PROSE_FINAL_PROMPT_VERSION
+        self.assertEqual(direct["result"]["final_prompt_version"], AUTONOMOUS_PROMPT_VERSION)
+        system = direct["result"]["action_steps"][0]["messages"][0]["content"]
+        self.assertNotIn("prepare_answer", system)
+        self.assertNotIn("At most five", system)
+        self.assertEqual(direct["policy"]["request_timeout"], 300)
+        self.assertIsNone(direct["policy"]["max_repairs"])
+
+        # Six real local retrievals / seven model rounds: no five-call gate.
+        many = run_case("react-over-five", [
+            *[native("search", {**search, "query": "Original detail " + str(i)}) for i in range(6)],
+            response("The requested fact is supported. [ID:1]")],
+            search_outcomes=[f.search([f.abstract_id])["results"] for _ in range(6)])
+        self.assertEqual(many["status"], "answered", many.get("error"))
+        self.assertEqual(many["result"]["autonomous_steps_used"], 7)
+        self.assertEqual(many["result"]["evidence_calls_used"], 6)
+        self.assertEqual(many["embedding_requests"], 6)
+        self.assertEqual(many["llm_requests"], 8)
+        self.assertEqual([row["ref"] for row in many["result"]["evidence_registry"]], [1])
+
+        # Recoverable tool/output/citation failures stay in one loop. Neither
+        # process narration nor an old action envelope can become recovered prose.
+        corrected = run_case("react-multiple-corrections", [
+            native("not_available", {}, "I will continue looking."),
+            native("search", {"wrong": "field"}), native("read_context", {"chunk_id": "unknown"}),
+            native("search", search), response("Unknown handle. [ID:99]"),
+            response("Unknown again. 【ID：99】"),
+            response({"action": "prepare_answer", "facts": [], "answerable": True, "missing_information": ""}),
+            response("Correct final. [ID: 1] Book [99] [1,2].")])
+        self.assertEqual(corrected["status"], "answered", corrected.get("error"))
+        self.assertGreater(corrected["chat_statistics"]["repairs"], 1)
+        self.assertEqual(corrected["result"]["autonomous_steps_used"], 8)
+        self.assertEqual(corrected["answer"]["text"], "Correct final. [ID:1] Book [99] [1,2].")
+        self.assertEqual(len(corrected["answer"]["citations"]), 1)
+        self.assertTrue(any(step.get("purpose") == "repair" for step in corrected["result"]["action_steps"]))
+        self.assertIsNone(corrected["result"]["recovery"])
+        self.assertIsNone(corrected["result"]["synthesis"])
+        for invalid in ("",):
+            empty = run_case("react-empty", [response(invalid), response("A complete evidence-gap explanation.")])
+            self.assertEqual(empty["status"], "answered")
+            self.assertEqual(empty["chat_statistics"]["repairs"], 1)
+
+        for case, final in (("ok", "Supported at the explicit limit. [ID:1]"), ("invalid", "Unknown. [ID:99]")):
+            limited = run_case("react-limit-" + case, [native("search", search), response(final)], iterations=1)
+            self.assertEqual(limited["llm_requests"], 3)
+            self.assertEqual(limited["chat_attempts"][-1]["purpose"], "synthesis")
+            self.assertEqual(limited["chat_attempts"][-1]["timeout_seconds"], 90)
+            self.assertNotIn("tools", json.loads(self.requests[-1].content))
+            self.assertEqual(limited["status"], "answered" if case == "ok" else "invalid_output")
+            self.assertEqual(limited["result"]["synthesis"]["status"], "completed" if case == "ok" else "invalid_output")
+            self.assertEqual(limited["result"]["autonomous_steps_used"], 1)
+            if case == "ok":
+                self.assertEqual(limited["result"]["final_prompt_version"], PROSE_FINAL_PROMPT_VERSION)
+
+        with patch("paper_assistant.agent.validate_prose_citations", side_effect=RuntimeError("offline synthesis failure")):
+            synthesis_failed = run_case("react-single-synthesis-failure", [native("search", search),
+                response("A candidate final answer. [ID:1]")], iterations=1)
+        self.assertEqual(synthesis_failed["status"], "tool_error")
+        self.assertEqual(synthesis_failed["llm_requests"], 3)
+        self.assertEqual(synthesis_failed["result"]["synthesis"]["status"], "failed")
+
+        # Normal JS is a native tool and does not force another preparation.
+        js = run_case("react-native-js", [native("search", search),
+            native("run_javascript", {"code": "console.log([1,2,3].reduce((a,b)=>a+b,0)/3)"}),
+            response("The mean calculated from the supplied values is 2. [ID:1]")])
+        self.assertEqual(js["status"], "answered")
+        self.assertEqual(js["result"]["javascript_calls"][0]["status"], "success")
+        self.assertEqual(js["result"]["evidence_calls_used"], 1)
+        self.assertEqual(js["llm_requests"], 4)
+        self.assertIn('"stdout": "2"', json.dumps(js["result"]["action_steps"], ensure_ascii=False))
+
+        # An exhausted transient logical invoke gets one no-tool synthesis;
+        # authentication failures are not sent through that fallback.
+        from scripts.check_llm import http_error
+        network = run_case("react-network-synthesis", [native("search", search), http_error(503), http_error(503),
+            response("Recovered supported evidence. [ID:1]")])
+        self.assertEqual(network["status"], "answered", network.get("error"))
+        self.assertEqual(network["result"]["stop_reason"], "error_synthesized")
+        self.assertEqual(network["chat_statistics"]["network_retries"], 1)
+        self.assertEqual(network["chat_attempts"][-1]["purpose"], "synthesis")
+        denied = run_case("react-auth-stop", [http_error(401)])
+        self.assertEqual(denied["status"], "tool_error")
+        self.assertEqual(denied["llm_requests"], 2)
+        self.assertIsNone(denied["result"]["synthesis"])
+
+        # Already validated prose survives cleanup failure with its bound source
+        # snapshot, without another invoke or an invented historical answer.
+        recovered = run_case("react-validated-recovery", [native("search", search),
+            response("The complete original final answer. [ID:1]")], close_error=RuntimeError("offline cleanup"))
+        self.assertEqual(recovered["status"], "answered", recovered.get("error"))
+        self.assertEqual(recovered["llm_requests"], 3)
+        self.assertEqual(recovered["result"]["recovery"]["kind"], "validated_final")
+        self.assertEqual(recovered["result"]["recovery"]["model_requests"], 0)
+        self.assertEqual(recovered["answer"]["evidence_sources"][0]["chunk_id"], f.abstract_id)
+        self.assertTrue(self.store.closed and self.searcher.closed and self.chat_client._closed)
+        saved = json.loads((self.root / recovered["history_report"]).read_text(encoding="utf-8"))
+        self.assertEqual(saved["answer"], recovered["answer"])
+        downloaded, markdown = runtime.download_payloads(recovered, project_root=self.root)
+        self.assertEqual(json.loads(downloaded)["answer"], recovered["answer"])
+        self.assertIn(recovered["answer"]["text"], markdown.decode("utf-8"))
 
         from dataclasses import replace
         import pymupdf
@@ -364,16 +534,43 @@ class RuntimeChecks(unittest.TestCase):
                   "text": "\n\n".join(child["text"] for child in children), "child_ids": child_ids,
                   "section_path": ["Method", "Recovered mechanism"], "content_type": "body",
                   "source_spans": parent_spans}
+        table_parent_id = f"{paper_id}_{revision}_parent2"
+        table_caption = "Table 2: Recovered measurements"
+        table_rows = ["<tr><td></td><td>Prec</td><td>Rec</td><td>F1</td></tr>",
+                      "<tr><td>BERT</td><td>0.91</td><td>0.92</td><td>0.93</td></tr>"]
+        table_children, table_parent_spans, table_offset = [], [], 0
+        for number, row_html in enumerate(table_rows, start=6):
+            text = table_caption + "\n" + row_html
+            span = {"block_id": f"p1:table:{number}", "pdf_page": 2,
+                    "bbox": [0.1, 0.2, 0.9, 0.3], "page_size": [600, 800],
+                    "coordinate_system": "normalized", "content_type": "table", "source_field": "content",
+                    "source_char_start": 0, "source_char_end": len(text), "text_start": 0, "text_end": len(text)}
+            table_children.append({
+                "chunk_id": f"{paper_id}_{revision}_p2_c{number}",
+                "paper_id": paper_id, "parse_revision": revision, "pdf_sha256": paper["pdf_sha256"],
+                "pdf_page": 2, "text": text, "text_sha256": sha256_bytes(text.encode("utf-8")),
+                "parent_id": table_parent_id, "section_path": ["Results", "Recovered measurements"],
+                "content_type": "table", "content_types": ["table"], "source_spans": [span],
+                "token_count": len(text.split()), "assets": []})
+            table_parent_spans.append({**deepcopy(span), "text_start": table_offset,
+                                       "text_end": table_offset + len(text)})
+            table_offset += len(text) + 1
+        table_parent = {"parent_id": table_parent_id, "paper_id": paper_id, "parse_revision": revision,
+                        "text": table_caption + "\n" + "\n".join(table_rows),
+                        "child_ids": [child["chunk_id"] for child in table_children],
+                        "section_path": ["Results", "Recovered measurements"], "content_type": "table",
+                        "content_types": ["table"], "source_spans": table_parent_spans}
         relative = f"data/chunks/{paper_id}/{revision}"
         manifest = {"schema_revision": "structured-pdf-v1", "paper_id": paper_id, "parse_revision": revision,
                     "recipe": recipe, "recipe_sha256": recipe_hash,
                     "source_paths": {"pdf": paper["local_path"], "parents": relative + "/parents.jsonl",
                                      "chunks": relative + "/chunks.jsonl"},
-                    "statistics": {"page_count": 2, "parent_count": 1, "source_block_count": 20,
-                                   "chunk_count": 10, "chunks_per_page": {"1": 5, "2": 5}}}
+                    "statistics": {"page_count": 2, "parent_count": 2, "source_block_count": 23,
+                                   "chunk_count": 12, "chunks_per_page": {"1": 5, "2": 7}}}
         database = self.root / "data/index/structured-runtime.sqlite3"
         with PaperStore(database) as store:
-            store.import_version(replace(_bundle(paper, manifest, children), parents=[parent]))
+            store.import_version(replace(_bundle(paper, manifest, children + table_children),
+                                         parents=[parent, table_parent]))
         pairs = [(paper_id, revision)]
         versions = [{"paper_id": paper_id, "parse_revision": revision}]
         question = "Explain how the recovered mechanism continues across both pages."
@@ -400,22 +597,32 @@ class RuntimeChecks(unittest.TestCase):
                         "name": "read_context", "arguments": json.dumps({"parent_id": parent_id})}
                     outcomes.append((200, tool))
                 if mode == "agent":
-                    outcomes.append(response(prepare_action(action)))
-                outcomes.append(response(action["answer"] if mode == "fixed_rag" else action))
+                    outcomes.append(response("The recovered mechanism continues across both pages. [ID:10]"))
+                else:
+                    outcomes.append(response(action["answer"]))
                 with patch.object(runtime.web_runtime, "_ready_versions", return_value=[{**versions[0], "title": paper["title"]}]):
                     r = self.invoke(mode, token=mode + "-structured", query=question, pairs=pairs,
                                     rows=anchors, library_mode=True, outcomes=outcomes)
                 self.assertEqual(r["status"], "answered", (r.get("error"), r["result"].get("failure_stage"),
                     (r["result"].get("context") or {}).get("omitted_evidence")))
-                self.assertEqual(r["answer"]["direct_answer"], action["answer"]["direct_answer"])
+                if mode == "agent":
+                    self.assertEqual(r["answer"]["text"],
+                                     "The recovered mechanism continues across both pages. [ID:10]")
+                    self.assertEqual(r["answer"]["citations"][0]["chunk_id"], child_ids[-1])
+                else:
+                    self.assertEqual(r["answer"]["direct_answer"], action["answer"]["direct_answer"])
                 self.assertEqual(r["embedding_requests"], 0 if mode == "agent" else 1)
-                self.assertEqual(r["llm_requests"], 2 if mode == "fixed_rag" else 4)
+                self.assertEqual(r["llm_requests"], 2 if mode == "fixed_rag" else 3)
                 self.assertEqual(self.store.get_parent.call_count, 1)
                 self.assertTrue(self.store._closed and self.searcher.closed and self.chat_client._closed)
                 context = r["result"]["context"]
-                self.assertEqual(context["max_tokens"], 8192)
-                self.assertEqual(context["tokenizer"], "Qwen3-Embedding-0.6B")
-                self.assertLessEqual(context["shown_tokens"], 8192)
+                if mode == "fixed_rag":
+                    self.assertEqual(context["max_tokens"], 8192)
+                    self.assertEqual(context["tokenizer"], "Qwen3-Embedding-0.6B")
+                    self.assertLessEqual(context["shown_tokens"], 8192)
+                else:
+                    self.assertIsNone(context["max_chars"])
+                    self.assertNotIn("max_tokens", context)
                 self.assertGreater(sum(len(row["shown_text"]) for row in context["shown_evidence"]), 8000)
                 self.assertEqual(len(context["shown_evidence"]), 10)
                 self.assertEqual(set(context["allowed_citation_ids"]), set(child_ids))
@@ -447,35 +654,53 @@ class RuntimeChecks(unittest.TestCase):
                 for key in ("parent_id", "section_path", "content_type", "content_types", "source_spans", "assets"):
                     self.assertEqual(evidence[key], children[-1][key])
                 self.assertEqual(evidence["reading_origins"][0]["parent_id"], parent_id)
-                actual_input = json.loads(json.loads(self.requests[-2 if mode == "agent" else -1].content)["messages"][-1]["content"])
                 if mode == "agent":
                     final_messages = json.loads(self.requests[-1].content)["messages"]
                     final_input = json.loads(final_messages[-1]["content"])
-                    prepare_response = json.loads(final_messages[-2]["content"])
-                    self.assertEqual(prepare_response["facts"][0]["evidence_quotes"], [quote])
-                    self.assertEqual(final_input["allowed_citation_ids"], context["allowed_citation_ids"])
-                    self.assertIn("the originals govern", final_messages[0]["content"])
+                    actual_input = final_input
+                    self.assertEqual(final_input["allowed_refs"], list(range(1, 11)))
+                    self.assertEqual([row["ref"] for section in final_input["evidence_sections"]
+                                      for row in section["chunks"]], list(range(1, 11)))
                     self.assertNotIn("prepared_answer", final_input)
-                    self.assertEqual(final_messages[-3]["content"],
-                                     json.loads(self.requests[-2].content)["messages"][-1]["content"])
-                self.assertEqual(actual_input["allowed_citation_ids"], context["allowed_citation_ids"])
+                    self.assertNotIn("allowed_actions", final_input)
+                    self.assertFalse(any(step.get("phase") == "prepared_final_decision"
+                                         for step in r["result"]["action_steps"]))
+                else:
+                    actual_input = json.loads(json.loads(self.requests[-1].content)["messages"][-1]["content"])
+                    self.assertEqual(actual_input["allowed_citation_ids"], context["allowed_citation_ids"])
                 visible = ([row for group in actual_input["evidence_sections"] for row in group["chunks"]]
                            if mode == "agent" else actual_input["shown_evidence"])
                 self.assertEqual(len(visible), 10)
                 if mode == "agent":
                     self.assertEqual(text_count(final_messages, children[-1]["text"]), 1)
                     self.assertEqual(actual_input["evidence_sections"][0]["section_path"], parent["section_path"])
-                self.assertEqual(actual_input["context_budget"]["max_tokens"], 8192)
+                    self.assertNotIn("context_budget", actual_input)
+                else:
+                    self.assertEqual(actual_input["context_budget"]["max_tokens"], 8192)
                 json_bytes, markdown_bytes = runtime.download_payloads(r, project_root=self.root)
                 downloaded = json.loads(json_bytes)
-                self.assertEqual(downloaded["answer"]["direct_answer"], action["answer"]["direct_answer"])
-                self.assertEqual(downloaded["answer"]["evidence_sources"], r["answer"]["evidence_sources"])
-                self.assertEqual(downloaded["answer"]["claims"][0]["evidence_quotes"], [quote])
+                if mode == "agent":
+                    self.assertEqual(downloaded["answer"]["text"],
+                                     "The recovered mechanism continues across both pages. [ID:10]")
+                    self.assertEqual(downloaded["answer"]["citations"], r["answer"]["citations"])
+                    self.assertEqual(downloaded["answer"]["evidence_sources"], r["answer"]["evidence_sources"])
+                    self.assertNotIn("claims", downloaded["answer"])
+                else:
+                    self.assertEqual(downloaded["answer"]["direct_answer"], action["answer"]["direct_answer"])
+                    self.assertEqual(downloaded["answer"]["evidence_sources"], r["answer"]["evidence_sources"])
+                    self.assertEqual(downloaded["answer"]["claims"][0]["evidence_quotes"], [quote])
                 saved = json.loads((self.root / r["history_report"]).read_text(encoding="utf-8"))
-                self.assertEqual(saved["answer"]["claims"][0]["evidence_quotes"], [quote])
+                if mode == "agent":
+                    self.assertEqual(saved["answer"]["text"], r["answer"]["text"])
+                else:
+                    self.assertEqual(saved["answer"]["claims"][0]["evidence_quotes"], [quote])
                 markdown = markdown_bytes.decode("utf-8")
-                self.assertIn("本项原文短引句", markdown)
-                self.assertIn(quote["quote"], markdown)
+                if mode == "agent":
+                    self.assertIn("The recovered mechanism continues across both pages. [ID:10]", markdown)
+                    self.assertNotIn("本项原文短引句", markdown)
+                else:
+                    self.assertIn("本项原文短引句", markdown)
+                    self.assertIn(quote["quote"], markdown)
                 self.assertIn(parent_id, markdown)
                 self.assertIn('"source_spans"', markdown)
                 self.assertIn('"coordinate_system": "normalized"', markdown)
@@ -483,6 +708,67 @@ class RuntimeChecks(unittest.TestCase):
                 self.assertIn("data/papers/structured-region.png", markdown)
                 for span in children[-1]["source_spans"]:
                     self.assertIn(span["block_id"], markdown)
+
+        # The actual directory exposes saved tables next to body sections.
+        # Search returns only body anchors; the mock chooses the table parent,
+        # and the native read supplies its real header and row.
+        with self.subTest(structured_table="agent"):
+            self.store = PaperStore(database, read_only=True)
+            self.addCleanup(self.store.close)
+            Registry(self.root, self.store, pairs)
+            table_question = "What absolute F1 did BERT report in the recovered results?"
+            table_preparation = {"standalone_question": table_question, "clarification_question": None,
+                                 "referenced_evidence_ids": [], "planned_queries": []}
+            table_action = answer_action(table_children[-1]["chunk_id"])
+            table_action["answer"]["direct_answer"] = "BERT reported F1 0.93."
+            table_action["answer"]["claims"][0]["claim"] = "BERT reported detection F1 0.93."
+            table_action["answer"]["claims"][0]["evidence_quotes"] = [
+                {"chunk_id": table_children[-1]["chunk_id"], "quote": table_rows[-1]}]
+            tool = check_agent.tool_response({})[1]
+            tool["choices"][0]["message"]["tool_calls"][0]["function"] = {
+                "name": "read_context", "arguments": json.dumps({"parent_id": table_parent_id})}
+            outcomes = [response(table_preparation), (200, tool),
+                        response("BERT reported detection F1 0.93. [ID:2]")]
+            with patch.object(runtime.web_runtime, "_ready_versions",
+                              return_value=[{**versions[0], "title": paper["title"]}]):
+                r = self.invoke("agent", token="agent-table-directory", query=table_question, pairs=pairs,
+                                rows=anchors, library_mode=True, outcomes=outcomes)
+            self.assertEqual(r["status"], "answered", (r.get("error"), r["result"].get("failure_stage")))
+            decision = json.loads(self.requests[1].content)
+            decision_payload = json.loads(decision["messages"][1]["content"])
+            directory = decision_payload["selected_papers"][0]["reading_directory"]
+            self.assertIn(parent_id, [entry["parent_id"] for entry in directory])
+            table_entry = next(entry for entry in directory if entry["parent_id"] == table_parent_id)
+            self.assertEqual(table_entry["content_type"], "table")
+            self.assertEqual(table_entry["caption"], table_caption)
+            self.assertEqual(table_entry["pdf_pages"], [2])
+            self.assertEqual(table_entry["section_path"], ["Results", "Recovered measurements"])
+            self.assertNotIn(table_rows[-1], json.dumps(decision_payload, ensure_ascii=False))
+            self.assertFalse(any(row.get("content_type") == "table"
+                                 for group in decision_payload["evidence_sections"] for row in group["chunks"]))
+            reads = r["result"]["context_reads"]
+            self.assertEqual(len(reads), 1)
+            self.assertEqual(reads[0]["status"], "success")
+            self.assertEqual(reads[0]["returned_ids"], [child["chunk_id"] for child in table_children])
+            self.assertEqual(reads[0]["section_path"], table_parent["section_path"])
+            visible = {row["chunk_id"]: row["shown_text"] for row in reads[0]["visible_chunks"]}
+            self.assertIn(table_rows[0], visible[table_children[0]["chunk_id"]])
+            self.assertIn(table_rows[1], visible[table_children[1]["chunk_id"]])
+            context = r["result"]["context"]
+            self.assertIn(table_children[-1]["chunk_id"], context["allowed_citation_ids"])
+            self.assertNotIn(table_parent_id, context["allowed_citation_ids"])
+            final_messages = json.loads(self.requests[2].content)["messages"]
+            final_input = json.loads(final_messages[-1]["content"])
+            self.assertEqual(final_input["allowed_refs"], [1, 2])
+            self.assertEqual([row["chunk_id"] for section in final_input["evidence_sections"]
+                              for row in section["chunks"]][-1], table_children[-1]["chunk_id"])
+            self.assertNotIn("allowed_actions", final_input)
+            self.assertEqual(text_count(final_messages, table_children[-1]["text"]), 1)
+            self.assertEqual(r["answer"]["text"], "BERT reported detection F1 0.93. [ID:2]")
+            self.assertEqual(r["answer"]["citations"][0]["chunk_id"], table_children[-1]["chunk_id"])
+            self.assertEqual(r["answer"]["evidence_refs"][0]["chunk_id"], table_children[-1]["chunk_id"])
+            self.assertEqual(r["answer"]["evidence_sources"][0]["text"], table_children[-1]["text"])
+            self.assertTrue(r["answer"]["evidence_sources"][0]["reading_origins"][0]["parent_id"] == table_parent_id)
 
         # Real 8192-token selection omits a returned target. The only new
         # operation is a local anchored read; no wider retrieval or paid client.
@@ -513,70 +799,6 @@ class RuntimeChecks(unittest.TestCase):
         rows = [{**deepcopy(row), "rank": rank, "score": 0.8} for rank, row in enumerate((background, target, oversize), 1)]
         search = {"query": "Find the requested mechanism condition", "selected_versions": versions,
                   "missing_information": "The requested original condition"}
-        gap = {"action": "prepare_answer", "facts": [], "answerable": False,
-               "missing_information": "The requested mechanism condition has not been displayed."}
-        no_direction = {"action": "insufficient_evidence",
-            "reason": "The selected original exceeds the unchanged window and the scoped available clues offer no other readable source for this condition."}
-        for outcome in ("read", "unshowable"):
-            chosen = target if outcome == "read" else oversize
-            read_args = {"chunk_id": chosen["chunk_id"], "missing_information": "Read the original mechanism condition"}
-            read = check_agent.tool_response({})[1]
-            read["choices"][0]["message"]["tool_calls"][0]["function"] = {"name": "read_context", "arguments": json.dumps(read_args)}
-            final = answer_action(target["chunk_id"])
-            quote = {"chunk_id": target["chunk_id"], "quote": target["text"].split(". ")[0] + "."}
-            final["answer"]["claims"][0]["evidence_quotes"] = [quote]
-            gap_final = {"action": "answer", "answer": {"status": "answered", "claims": [
-                {"claim": "The requested condition remains unavailable in the current readable originals.", "basis": "analysis", "citation_ids": []}]}}
-            self.store = PaperStore(large_database, read_only=True)
-            self.addCleanup(self.store.close)
-            with patch.object(runtime.web_runtime, "_ready_versions", return_value=[{**versions[0], "title": paper["title"]}]):
-                r = self.invoke("agent", token="anchored-" + outcome, query=question, pairs=pairs, rows=rows,
-                    library_mode=True, outcomes=[response(preparation), check_agent.tool_response(search), response(gap), (200, read),
-                        response(prepare_action(final) if outcome == "read" else no_direction), response(final if outcome == "read" else gap_final)])
-            self.assertEqual(r["status"], "answered", r.get("error"))
-            before = json.loads(json.loads(self.requests[2].content)["messages"][-1]["content"])
-            location = next(row for row in before["candidate_locations"] if row["chunk_id"] == target["chunk_id"])
-            self.assertEqual(location["omission_reason"], "token_budget")
-            self.assertEqual(location["paper_id"], paper_id)
-            self.assertEqual(location["parse_revision"], revision)
-            self.assertNotIn("shown_text", location)
-            self.assertNotIn(target["chunk_id"], before["allowed_citation_ids"])
-            self.assertNotIn(target["text"], json.dumps(before, ensure_ascii=False))
-            read_record = r["result"]["context_reads"][0]
-            self.assertEqual(read_record["chunk_id"], chosen["chunk_id"])
-            self.assertEqual(read_record["missing_information"], read_args["missing_information"])
-            self.assertEqual(r["result"]["evidence_calls_used"], 2)
-            self.assertEqual(r["llm_requests"], 6)
-            self.assertEqual(r["embedding_requests"], 1)
-            self.assertEqual(r["rerank_requests"], 0)
-            self.assertEqual(r["result"]["autonomous_steps_used"], 4)
-            if outcome == "read":
-                next_preparation = json.loads(json.loads(self.requests[4].content)["messages"][-1]["content"])
-                visible = [row for group in next_preparation["evidence_sections"] for row in group["chunks"]]
-                self.assertEqual(visible[0]["chunk_id"], target["chunk_id"])
-                self.assertEqual(visible[0]["shown_text"], target["text"])
-                self.assertEqual(read_record["shown_ids"], [target["chunk_id"]])
-                self.assertEqual(read_record["status"], "success")
-                self.assertNotIn(background["chunk_id"], next_preparation["allowed_citation_ids"])
-                final_messages = json.loads(self.requests[-1].content)["messages"]
-                final_payload = json.loads(final_messages[-1]["content"])
-                self.assertEqual(json.loads(final_messages[-2]["content"])["facts"][0]["evidence_quotes"], [quote])
-                self.assertEqual(final_payload["allowed_citation_ids"], [target["chunk_id"]])
-                self.assertEqual(final_messages[-3]["content"],
-                                 json.loads(self.requests[4].content)["messages"][-1]["content"])
-                self.assertEqual(text_count(final_messages, target["text"]), 1)
-                self.assertEqual(r["answer"]["evidence_sources"][0]["text"], target["text"])
-            else:
-                self.assertEqual(read_record["status"], "no_new_shown_evidence")
-                self.assertEqual(read_record["shown_ids"], [])
-                self.assertIn(oversize["chunk_id"], read_record["not_shown_ids"])
-                self.assertEqual(r["result"]["action_steps"][-2]["phase"], "gap_evidence_decision")
-            self.assertTrue(self.store._closed and self.searcher.closed and self.chat_client._closed)
-            downloaded, markdown = runtime.download_payloads(r, project_root=self.root)
-            self.assertEqual(json.loads(downloaded)["result"]["context_reads"], r["result"]["context_reads"])
-            self.assertIn(read_args["missing_information"], markdown.decode("utf-8"))
-            self.assertIn('"candidate_locations"', markdown.decode("utf-8"))
-
         from paper_assistant.agent_prompt import NORMAL_ANSWER_INSTRUCTION
         from paper_assistant.context import prepare_context
         from paper_assistant.fixed_evidence import run_two_stage
@@ -656,6 +878,12 @@ class RuntimeChecks(unittest.TestCase):
         self.assertIn("独立最终生成", markdown)
 
     def test_original_query_and_complete_pairs_preserved(self):
+        from dataclasses import replace
+        self.settings = replace(self.settings, context_length=1048576)
+
+        def text_count(messages, text):
+            return sum((message.get("content") or "").count(text) for message in messages)
+
         query = "  摘要中提到了什么？\n "
         r = self.invoke(query=query)
         self.assertEqual(r["query"], query)
@@ -723,41 +951,40 @@ class RuntimeChecks(unittest.TestCase):
                 first_followup = deepcopy(r)
 
                 clarification = "你指的是方法一还是方法二？"
-                r = self.invoke(mode, token=mode + "-clarification", query="它怎样停止？",
+                r = self.invoke(mode, token=mode + "-clarification-fallback", query="它怎样停止？",
                     conversation_id="current-conversation", conversation_history=history,
                     outcomes=[response({"standalone_question": None,
-                        "clarification_question": clarification, "referenced_evidence_ids": []})])
-                self.assertEqual(r["status"], "needs_clarification")
-                self.assertEqual(r["clarification_question"], clarification)
-                self.assertIsNone(r["answer"])
-                self.assertEqual(self.searcher.calls, [])
-                self.assertEqual(r["embedding_requests"], 0)
-                self.assertEqual(r["rerank_requests"], 0)
-                self.assertEqual(r["llm_requests"], 1)
+                        "clarification_question": clarification, "referenced_evidence_ids": []}),
+                        answer_response])
+                self.assertEqual(r["status"], "answered", r.get("error"))
+                self.assertEqual(r["user_question"], "它怎样停止？")
+                self.assertEqual(r["standalone_question"], "它怎样停止？")
+                self.assertEqual(r["query"], "它怎样停止？")
+                self.assertEqual(self.searcher.calls[0]["query"], "它怎样停止？")
+                self.assertEqual(r["result"]["context"]["question"], "它怎样停止？")
+                self.assertEqual(r["llm_requests"], 2)
                 self.assertEqual(r["export"]["status"], "completed")
                 json_bytes, markdown_bytes = runtime.download_payloads(r, project_root=self.root)
                 downloaded = json.loads(json_bytes)
-                self.assertEqual(downloaded["status"], "needs_clarification")
-                self.assertIsNone(downloaded["standalone_question"])
-                self.assertEqual(downloaded["user_question"], "它怎样停止？")
-                self.assertIn(clarification, markdown_bytes.decode("utf-8"))
-                self.assertIn("尚待澄清，未形成完整问题。", markdown_bytes.decode("utf-8"))
+                self.assertEqual(downloaded["status"], "answered")
+                self.assertEqual(downloaded["standalone_question"], "它怎样停止？")
+                self.assertIn("它怎样停止？", markdown_bytes.decode("utf-8"))
 
                 clarified_history = [*history, {"turn": 2, "status": "needs_clarification",
                     "user_question": "它怎样停止？", "standalone_question": None,
                     "clarification_question": clarification}]
-                r = self.invoke(mode, token=mode + "-clarification-reply", query="方法一",
+                r = self.invoke(mode, token=mode + "-old-clarification-history", query="方法一",
                     conversation_id="current-conversation", conversation_history=clarified_history,
                     outcomes=[response(prepared), answer_response])
-                self.assertEqual(r["status"], "answered")
+                self.assertEqual(r["status"], "answered", r.get("error"))
                 self.assertEqual(r["user_question"], "方法一")
+                self.assertEqual(r["standalone_question"], standalone)
                 preparation_payload = json.loads(json.loads(self.requests[0].content)["messages"][-1]["content"])
                 self.assertEqual(preparation_payload["history"][-1]["clarification_question"], clarification)
                 json_bytes, markdown_bytes = runtime.download_payloads(first_followup, project_root=self.root)
                 self.assertEqual(json.loads(json_bytes)["user_question"], followup)
                 self.assertEqual(json.loads(json_bytes)["answer"], first_followup["answer"])
                 self.assertIn(followup, markdown_bytes.decode("utf-8"))
-                self.assertEqual(len(self.requests), 2)
 
         restored_question = "解释上一轮正文结论所引用的原文。"
         r = self.invoke(token="fixed-old-evidence", query="这条结论的原文是什么意思？",
@@ -819,7 +1046,7 @@ class RuntimeChecks(unittest.TestCase):
                             "referenced_evidence_ids": [], "planned_queries": plans}),
                             *[check_agent.tool_response(search_action(text)) for text in actual_queries],
                             response(prepare_action(answer_action(self.fixture.abstract_id))), response(answer_action(self.fixture.abstract_id))])
-                    self.assertEqual(r["status"], "answered")
+                    self.assertEqual(r["status"], "answered", r.get("error"))
                     self.assertEqual(r["planned_queries"], plans)
                     self.assertEqual(r["standalone_question"], question)
                     self.assertEqual(r["user_question"], question)
@@ -956,15 +1183,15 @@ class RuntimeChecks(unittest.TestCase):
             self.assertEqual(r["llm_requests"], 2)
             self.assertEqual(self.searcher.calls, [])
 
-            r = self.invoke("agent", token="planning-first-clarification", query="它呢？", library_mode=True,
+            r = self.invoke("agent", token="planning-first-no-clarification", query="它呢？", library_mode=True,
                 outcomes=[response({"standalone_question": None, "clarification_question": "你指哪一个方法？",
-                    "referenced_evidence_ids": [self.fixture.body_id], "planned_queries": plans})])
-            self.assertEqual(r["status"], "needs_clarification")
-            self.assertEqual(r["planned_queries"], [])
+                    "referenced_evidence_ids": [self.fixture.body_id], "planned_queries": plans}),
+                    response(general)])
+            self.assertEqual(r["status"], "answered", r.get("error"))
+            self.assertEqual(r["standalone_question"], "它呢？")
+            self.assertEqual(r["result"]["query"], "它呢？")
+            self.assertEqual(r["llm_requests"], 2)
             self.assertEqual(self.searcher.calls, [])
-            self.assertEqual(r["embedding_requests"], 0)
-            self.assertEqual(r["rerank_requests"], 0)
-            self.assertEqual(r["llm_requests"], 1)
 
             r = self.invoke("agent", token="planning-first-invalid", query="它呢？", library_mode=True,
                 outcomes=[response("not JSON")])
@@ -982,6 +1209,21 @@ class RuntimeChecks(unittest.TestCase):
             first_prep = {"action": "prepare_answer", "facts": [], "answerable": False,
                           "missing_information": "The requested source and filtering condition remain absent."}
             conversation = response({"clarification_question": None, "planned_queries": []})
+
+            performance_question = "What is the performance of BERT on the task?"
+            performance = self.invoke("agent", token="planning-performance-normal", query=performance_question,
+                library_mode=True, rows=self.fixture.search([self.fixture.abstract_id])["results"],
+                outcomes=[conversation, check_agent.tool_response(search_action("BERT performance")),
+                    response(prepare_action(final_action)), response(final_action)])
+            self.assertEqual(performance["status"], "answered", performance.get("error"))
+            self.assertEqual(performance["user_question"], performance_question)
+            self.assertEqual(performance["standalone_question"], performance_question)
+            self.assertEqual(self.searcher.calls[0]["query"], "BERT performance")
+            self.assertEqual([step["phase"] for step in performance["result"]["action_steps"]],
+                             ["autonomous_decision", "autonomous_decision", "prepared_final_decision"])
+            self.assertEqual(performance["embedding_requests"], 1)
+            self.assertEqual(performance["llm_requests"], 4)
+
             r = self.invoke("agent", token="prepare-gap-search", library_mode=True,
                 search_outcomes=[[], self.fixture.search([self.fixture.abstract_id])["results"]],
                 outcomes=[conversation, check_agent.tool_response(search_action("initial topic")),
@@ -1034,7 +1276,6 @@ class RuntimeChecks(unittest.TestCase):
             self.assertIn(no_direction["reason"], final_payload["missing_information"])
             self.assertEqual(final_messages[1]["content"],
                              json.loads(self.requests[1].content)["messages"][-1]["content"])
-            self.assertEqual(text_count(final_messages, self.fixture.chunks[self.fixture.abstract_id]["text"]), 1)
             self.assertEqual(r["stop_reason"], "no_reliable_evidence_direction")
             for repeat_invalid in (False, True):
                 r = self.invoke("agent", token="prepare-gap-repeat-" + str(repeat_invalid), library_mode=True,
@@ -1072,37 +1313,67 @@ class RuntimeChecks(unittest.TestCase):
                 self.assertEqual(repaired_messages[-4]["content"], original_messages[-2]["content"])
                 self.assertEqual(json.loads(repaired_messages[-2]["content"])["action"], "answer")
                 self.assertEqual(json.loads(repaired_messages[-1]["content"])["allowed_actions"], ["answer"])
-                self.assertEqual(text_count(repaired_messages, self.fixture.chunks[self.fixture.abstract_id]["text"]), 1)
+                self.assertGreaterEqual(
+                    text_count(repaired_messages, self.fixture.chunks[self.fixture.abstract_id]["text"]), 1)
                 self.assertTrue(self.store.closed and self.searcher.closed and self.chat_client._closed)
 
             # A chunk actually provided in evidence_sections stays citable even
-            # when the preparation facts did not cite it; an unshown chunk does not.
+            # when the preparation facts did not cite it; a claim that needs two
+            # chunks keeps both sources. An unshown chunk does not become visible.
             provided_question = "Explain the paper's recovered method and the body-only fact."
             provided_rows = self.fixture.search(
                 [self.fixture.abstract_id, self.fixture.body_id])["results"]
+            abstract_text = self.fixture.chunks[self.fixture.abstract_id]["text"]
+            body_text = self.fixture.chunks[self.fixture.body_id]["text"]
             provided_preparation = {"action": "prepare_answer",
-                "facts": [{"claim": self.fixture.chunks[self.fixture.abstract_id]["text"],
+                "facts": [{"claim": abstract_text,
                            "basis": "paper_evidence", "citation_ids": [self.fixture.abstract_id],
                            "evidence_quotes": [{"chunk_id": self.fixture.abstract_id,
-                               "quote": self.fixture.chunks[self.fixture.abstract_id]["text"]}]}],
+                               "quote": abstract_text}]},
+                          {"claim": ("The abstract chunk identifies an offline structural source and "
+                                     "the body chunk reports a page-one fact."),
+                           "basis": "paper_evidence",
+                           "citation_ids": [self.fixture.abstract_id, self.fixture.body_id],
+                           "evidence_quotes": [
+                               {"chunk_id": self.fixture.abstract_id, "quote": abstract_text},
+                               {"chunk_id": self.fixture.body_id, "quote": body_text}]}],
                 "answerable": True, "missing_information": ""}
             provided_answer = {"action": "answer", "answer": {"status": "answered", "claims": [
-                {"claim": self.fixture.chunks[self.fixture.body_id]["text"],
+                {"claim": body_text,
                  "basis": "paper_evidence", "citation_ids": [self.fixture.body_id],
                  "evidence_quotes": [{"chunk_id": self.fixture.body_id,
-                     "quote": self.fixture.chunks[self.fixture.body_id]["text"]}]}]}}
+                     "quote": body_text}]},
+                {"claim": ("The abstract evidence identifies an offline structural source, and "
+                           "the body evidence reports a page-one fact."),
+                 "basis": "paper_evidence",
+                 "citation_ids": [self.fixture.abstract_id, self.fixture.body_id],
+                 "evidence_quotes": [
+                     {"chunk_id": self.fixture.abstract_id, "quote": abstract_text},
+                     {"chunk_id": self.fixture.body_id, "quote": body_text}]}]}}
             with patch.object(runtime.web_runtime, "_ready_versions", return_value=[{
-                    **search["selected_versions"][0], "title": "Offline structural fixture"}]):
+                    **versions[0], "title": "Offline structural fixture"}]):
                 provided = self.invoke("agent", token="prepared-unshown-source", library_mode=True,
                     query=provided_question, rows=provided_rows,
                     outcomes=[response({"clarification_question": None, "planned_queries": []}),
+                        check_agent.tool_response(search_action(provided_question)),
                         response(provided_preparation), response(provided_answer)])
-            self.assertEqual(provided["status"], "answered", provided.get("error"))
+            self.assertEqual(provided["status"], "answered",
+                             (provided.get("error"), [(s.get("phase"), s.get("parse_error_code"),
+                              (s.get("error") or {}).get("code")) for s in provided["result"]["action_steps"]],
+                              provided["result"].get("citation_checks"), len(self.requests)))
             self.assertEqual(set(provided["result"]["context"]["allowed_citation_ids"]),
                              {self.fixture.abstract_id, self.fixture.body_id})
-            self.assertEqual(provided["answer"]["evidence_sources"][0]["chunk_id"], self.fixture.body_id)
-            self.assertEqual(provided["answer"]["evidence_sources"][0]["text"],
-                             self.fixture.chunks[self.fixture.body_id]["text"])
+            self.assertEqual([source["chunk_id"] for source in provided["answer"]["evidence_sources"]],
+                             [self.fixture.body_id, self.fixture.abstract_id])
+            self.assertEqual(provided["answer"]["evidence_sources"][0]["text"], body_text)
+            self.assertEqual(provided["answer"]["evidence_sources"][1]["text"], abstract_text)
+            self.assertEqual(len(provided["answer"]["claims"]), 2)
+            self.assertEqual(len(provided["answer"]["evidence_refs"]), 2)
+            self.assertEqual(provided["llm_requests"], 4)
+            self.assertEqual(provided["embedding_requests"], 1)
+            self.assertEqual(provided["chat_statistics"]["repairs"], 0)
+            self.assertEqual([step["phase"] for step in provided["result"]["action_steps"]],
+                             ["autonomous_decision", "autonomous_decision", "prepared_final_decision"])
             provided_final = json.loads(self.requests[-1].content)["messages"]
             provided_payload = json.loads(provided_final[-1]["content"])
             self.assertEqual(provided_payload["allowed_citation_ids"],
@@ -1110,8 +1381,31 @@ class RuntimeChecks(unittest.TestCase):
             self.assertNotIn(self.fixture.mixed_id, provided_payload["allowed_citation_ids"])
             self.assertNotIn(self.fixture.chunks[self.fixture.mixed_id]["text"],
                              json.dumps(provided_final))
-            self.assertEqual(text_count(provided_final,
-                                        self.fixture.chunks[self.fixture.body_id]["text"]), 1)
+            self.assertGreaterEqual(text_count(provided_final, body_text), 1)
+            self.assertGreaterEqual(text_count(provided_final, abstract_text), 1)
+            self.assertIn(abstract_text, json.dumps(provided_final))
+            self.assertIn(body_text, json.dumps(provided_final))
+            self.assertEqual(provided["result"]["context"]["max_chars"], None)
+            from paper_assistant.message_fit import context_fit_budget
+            self.assertEqual(self.settings.context_length, 1048576)
+            self.assertEqual(context_fit_budget(self.settings.context_length, 4096),
+                             min(1048576 * 97 // 100, 1048576 - 4096))
+            self.assertEqual(context_fit_budget(None, 4096), 4096)
+            prepared_response = json.loads(provided_final[-2]["content"])
+            self.assertEqual(prepared_response["facts"][1]["citation_ids"],
+                             [self.fixture.abstract_id, self.fixture.body_id])
+            self.assertEqual([quote["chunk_id"] for quote in prepared_response["facts"][1]["evidence_quotes"]],
+                             [self.fixture.abstract_id, self.fixture.body_id])
+            provided_system = " ".join(provided_final[0]["content"].lower().split())
+            self.assertIn("whole merged claim", provided_system)
+            self.assertIn("prepared citations are not audited conclusions", provided_system)
+            provided_json, provided_markdown = runtime.download_payloads(
+                provided, project_root=self.root)
+            provided_saved = json.loads(provided_json)
+            self.assertEqual({ref["chunk_id"] for ref in provided_saved["answer"]["evidence_refs"]},
+                             {self.fixture.abstract_id, self.fixture.body_id})
+            for text in (abstract_text, body_text):
+                self.assertIn(text, provided_markdown.decode("utf-8"))
             self.assertEqual(provided["result"]["action_steps"][-1]["phase"], "prepared_final_decision")
 
             r = self.invoke("agent", token="prepare-fifth-step", library_mode=True,

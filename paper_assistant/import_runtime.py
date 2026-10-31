@@ -14,10 +14,11 @@ import pymupdf
 
 from paper_assistant.agent_runtime import load_current_profile
 from paper_assistant.chunking import ChunkingConfig, build_chunks, pretty_json_bytes, sha256_bytes
-from paper_assistant.config import ConfigError, load_embedding_settings
+from paper_assistant.config import ConfigError, load_embedding_settings, load_mineru_api_settings
 from paper_assistant.embedding_client import EmbeddingAPIError, embed_texts
 from paper_assistant.indexing import EmbeddingCache, IndexBuilder, IndexingError, digest
 from paper_assistant.ingest import parse_pdf_pages, save_page_records
+from paper_assistant.mineru_api import parse_pdf_via_api
 from paper_assistant.quality import FILTER_REVISION, filter_paper_pages, iter_indexable_segments
 from paper_assistant.retrieval import QdrantStore, VectorStoreError
 from paper_assistant.storage import PaperStore, StorageError, StoredVersionInput
@@ -27,7 +28,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def import_pdf(pdf_bytes, filename, *, title=None, source_url="", project_root=ROOT, on_progress=None,
-               parser="mineru-standard", api_bundle=None, api_batch_id=None):
+               parser="mineru-api", api_bundle=None, api_batch_id=None):
     """Import a PDF with the selected parsing scheme; retain prior versions and caches."""
     started = phase_started = perf_counter()
     phase = "parse"
@@ -93,14 +94,51 @@ def import_pdf(pdf_bytes, filename, *, title=None, source_url="", project_root=R
                     pdf_bytes, paper, result, root, store, progress,
                     source_url=source_url, page_count=page_count, pdf_sha256=pdf_sha256)
             elif parser == "mineru-api":
+                parser_profile = None
+                # Reuse a previously imported API bundle for the same PDF before
+                # uploading another task. Local Standard versions never qualify.
+                if api_bundle is None and paper is not None:
+                    previous = store.connection.execute(
+                        "SELECT manifest_json FROM parse_versions WHERE paper_id = ? ORDER BY rowid DESC",
+                        (paper["paper_id"],)).fetchall()
+                    for row in previous:
+                        metadata = json.loads(row["manifest_json"])
+                        source = metadata.get("parse_source") or {}
+                        if source.get("kind") != "mineru-api" or not source.get("bundle"):
+                            continue
+                        candidate = (root / source["bundle"]).resolve()
+                        if candidate.is_dir() and (candidate / "layout.json").is_file():
+                            api_bundle = candidate
+                            api_batch_id = source.get("batch_id")
+                            parser_profile = metadata.get("recipe", {}).get("parser")
+                            break
                 if api_bundle is None:
-                    raise ValueError("mineru-api 解析方案需要已有的 API 结果目录。")
+                    api_dir = root / "data/mineru_api" / pdf_sha256
+                    if api_dir.exists():
+                        if not (api_dir / "layout.json").is_file() or not (api_dir / "full.md").is_file():
+                            raise ValueError("已有未完成的 MinerU API 结果目录，拒绝重复上传："
+                                             + str(api_dir.relative_to(root)))
+                        api_bundle = api_dir
+                    else:
+                        settings = load_mineru_api_settings()
+                        api_input = root / "data/mineru_api" / (pdf_sha256 + ".pdf")
+                        api_input.parent.mkdir(parents=True, exist_ok=True)
+                        if not api_input.is_file():
+                            api_input.write_bytes(pdf_bytes)
+                        parsed = parse_pdf_via_api(
+                            api_input, api_dir, settings,
+                            on_progress=lambda message: progress("parse", parser_message=message))
+                        api_bundle = parsed["output_dir"]
+                        api_batch_id = parsed["batch_id"]
                 from paper_assistant.mineru_parser import api_parser_profile
                 from paper_assistant.structured_ingest import prepare_structured_version
                 bundle = Path(api_bundle)
                 if not bundle.is_absolute():
                     bundle = root / bundle
-                profile = api_parser_profile(bundle / "layout.json")
+                if parser_profile is None:
+                    profile = api_parser_profile(bundle / "layout.json")
+                else:
+                    profile = parser_profile
                 paper, version = prepare_structured_version(
                     pdf_bytes, paper, result, root, store, progress,
                     source_url=source_url, page_count=page_count, pdf_sha256=pdf_sha256,

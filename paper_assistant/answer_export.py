@@ -78,15 +78,23 @@ def render(report: dict, *, project_root: Path) -> str:
         evidence_status = EVIDENCE_STATUS_LABELS.get(answer.get("evidence_status"))
         if evidence_status:
             lines += ["回答依据：" + evidence_status + "。", ""]
-        for number, claim in enumerate(answer.get("claims", []), start=1):
-            basis = claim.get("basis", "paper_evidence")
-            lines += [f"结论 {number}（{BASIS_LABELS.get(basis, '未标注依据')}）：", "", fenced(claim["claim"]), ""]
-            for quote in claim.get("evidence_quotes") or []:
-                lines += ["本项原文短引句（" + code_span(quote["chunk_id"]) + "）：", "", fenced(quote["quote"]), ""]
-            ids = claim.get("citation_ids") or []
-            if ids:
-                label = "分析前提引用：" if basis == "analysis" else "引用："
-                lines += [label + ", ".join(code_span(value) for value in ids), ""]
+        if isinstance(answer.get("text"), str):
+            lines += [answer["text"], ""]
+            citations = answer.get("citations") or []
+            if citations:
+                lines += ["引用出现序：" + ", ".join(
+                    f"[{row.get('ref')}] {code_span(row.get('chunk_id'))}" for row in citations
+                    if isinstance(row, dict)), ""]
+        else:
+            for number, claim in enumerate(answer.get("claims", []), start=1):
+                basis = claim.get("basis", "paper_evidence")
+                lines += [f"结论 {number}（{BASIS_LABELS.get(basis, '未标注依据')}）：", "", fenced(claim["claim"]), ""]
+                for quote in claim.get("evidence_quotes") or []:
+                    lines += ["本项原文短引句（" + code_span(quote["chunk_id"]) + "）：", "", fenced(quote["quote"]), ""]
+                ids = claim.get("citation_ids") or []
+                if ids:
+                    label = "分析前提引用：" if basis == "analysis" else "引用："
+                    lines += [label + ", ".join(code_span(value) for value in ids), ""]
         if answer.get("reason"):
             lines += ["回答说明：", "", fenced(answer["reason"]), ""]
         if answer.get("evidence_sources"):

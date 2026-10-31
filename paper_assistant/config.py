@@ -24,6 +24,7 @@ class LLMSettings:
     api_key: str = field(repr=False)
     base_url: str
     timeout: float
+    context_length: int | None = None
 
 
 @dataclass(frozen=True)
@@ -95,12 +96,22 @@ def load_llm_settings() -> LLMSettings:
         "LLM_BASE_URL",
         "LLM_TIMEOUT",
     )
+    raw_context_length = (values.get("LLM_CONTEXT_LENGTH") or "").strip()
+    context_length = None
+    if raw_context_length:
+        try:
+            context_length = int(raw_context_length)
+        except ValueError as exc:
+            raise ConfigError("LLM_CONTEXT_LENGTH 必须是大于 0 的整数") from exc
+        if context_length <= 0:
+            raise ConfigError("LLM_CONTEXT_LENGTH 必须是大于 0 的整数")
     return LLMSettings(
         provider=required["LLM_PROVIDER"],
         model_id=required["LLM_MODEL_ID"],
         api_key=required["LLM_API_KEY"],
         base_url=_url("LLM_BASE_URL", required["LLM_BASE_URL"]),
         timeout=_positive_float("LLM_TIMEOUT", required["LLM_TIMEOUT"]),
+        context_length=context_length,
     )
 
 
@@ -156,3 +167,15 @@ def load_rerank_settings() -> RerankSettings | None:
         base_url=_url("RERANK_BASE_URL", required["RERANK_BASE_URL"]),
         timeout=_positive_float("RERANK_TIMEOUT", (values.get("RERANK_TIMEOUT") or "30").strip()),
     )
+
+
+def load_agent_max_iterations():
+    """Interactive native-tool loop cap; legacy callers retain their policy."""
+    value = (_read_env().get("AGENT_MAX_ITERATIONS") or "120").strip()
+    try:
+        number = int(value)
+    except ValueError as error:
+        raise ConfigError("AGENT_MAX_ITERATIONS 必须为正整数") from error
+    if number <= 0:
+        raise ConfigError("AGENT_MAX_ITERATIONS 必须为正整数")
+    return number

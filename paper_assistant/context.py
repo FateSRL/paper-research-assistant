@@ -17,6 +17,8 @@ STRUCTURED_FIELDS = {"parent_id", "source_spans", "section_path", "content_type"
 
 
 def token_context_options(*, registry=None, context=None, candidates=None):
+    if getattr(registry, "full_context_mode", False):
+        return {}
     if context is not None and context.get("max_tokens") is not None:
         return {"max_tokens": context["max_tokens"]}
     if getattr(registry, "structured", False) or any(row.get("source_spans") for row in candidates or []):
@@ -237,14 +239,19 @@ def _candidate(item, pairs):
 
 def select_context(candidates: list[dict], selected_versions: list[tuple[str, str]], *, max_chars=8000,
                    max_tokens=None) -> dict:
-    """按 rank 稳定排序，去重，完整加入；首次超预算后不继续塞小片段。"""
-    if type(max_chars) is not int or not 1 <= max_chars <= 8000:
+    """按 rank 稳定排序，去重，完整加入；首次超预算后不继续塞小片段。
+
+    ``max_chars=None`` means the caller uses whole-request capacity fitting
+    instead of the legacy evidence character window.
+    """
+    if max_chars is not None and (type(max_chars) is not int or not 1 <= max_chars <= 8000):
         _fail("invalid_character_budget")
     pairs = _pairs(selected_versions)
     if not isinstance(candidates, list):
         _fail("invalid_candidates")
     checked = [_candidate(item, pairs) for item in candidates]
-    options = token_context_options(context={"max_tokens": max_tokens}, candidates=checked)
+    options = (token_context_options(context={"max_tokens": max_tokens}, candidates=checked)
+               if max_chars is not None else {})
     max_tokens = options.get("max_tokens")
     count_tokens = _token_counter() if max_tokens is not None else None
     identities = {}
@@ -263,7 +270,7 @@ def select_context(candidates: list[dict], selected_versions: list[tuple[str, st
             seen.add(identifier)
             if stopped:
                 reason = "after_budget_stop"
-            elif count_tokens is None and chars + len(item["text"]) > max_chars:
+            elif count_tokens is None and max_chars is not None and chars + len(item["text"]) > max_chars:
                 reason, stopped = "character_budget", True
             elif count_tokens is not None:
                 trial = {**item, "shown_text": item["text"], "shown_char_start": 0,
@@ -359,7 +366,7 @@ def build_messages(question: str, context: dict, *, conversation_context=None) -
     fields = {"chunk_id", "paper_id", "parse_revision", "pdf_page", "rank", "score", "text_sha256",
               "shown_text", "shown_char_start", "shown_char_end", "shown_text_sha256"}
     for item in shown:
-        if not isinstance(item, dict) or not fields.issubset(item) or set(item) - fields - STRUCTURED_FIELDS:
+        if not isinstance(item, dict) or not fields.issubset(item) or set(item) - fields - STRUCTURED_FIELDS - {"ref"}:
             _fail("invalid_snapshot")
         _candidate({**item, "text": item["shown_text"]}, pairs)
         if (type(item["shown_char_start"]) is not int or item["shown_char_start"] != 0
@@ -370,8 +377,10 @@ def build_messages(question: str, context: dict, *, conversation_context=None) -
     if len(set(ids)) != len(ids) or context.get("allowed_citation_ids") != ids:
         _fail("allowed_ids_mismatch")
     max_chars, chars = context.get("max_chars"), sum(len(item["shown_text"]) for item in shown)
-    if (type(max_chars) is not int or not 1 <= max_chars <= 8000 or type(context.get("shown_chars")) is not int
-            or context["shown_chars"] != chars or (context.get("max_tokens") is None and chars > max_chars)):
+    if ((max_chars is not None and (type(max_chars) is not int or not 1 <= max_chars <= 8000))
+            or type(context.get("shown_chars")) is not int
+            or context["shown_chars"] != chars
+            or (context.get("max_tokens") is None and max_chars is not None and chars > max_chars)):
         _fail("snapshot_budget_mismatch")
     omitted, count = context.get("omitted_evidence"), context.get("candidate_count")
     if (not isinstance(omitted, list) or type(count) is not int or count != len(shown) + len(omitted)
@@ -414,7 +423,7 @@ def autonomous_evidence_view(context, paper_information):
             groups[key] = {"paper_id": key[0], "parse_revision": key[1],
                            "title": row.get("title"), "section_path": list(key[2]), "chunks": []}
         groups[key]["chunks"].append({k: deepcopy(row[k]) for k in
-            ("chunk_id", "pdf_page", "rank", "score", "parent_id", "shown_text", "source_spans", "reading_origins")
+            ("ref", "chunk_id", "pdf_page", "rank", "score", "parent_id", "shown_text", "source_spans", "reading_origins")
             if k in row})
     sections = list(groups.values())
     for group in sections:
@@ -438,12 +447,14 @@ def autonomous_evidence_view(context, paper_information):
     return sections, papers
 
 
-def fit_autonomous_context(context, paper_information, candidates, *, omission_reasons=None):
+def fit_autonomous_context(context, paper_information, candidates, *, omission_reasons=None, evidence_registry=None):
     """Fit real location-only candidates alongside originals in the same window."""
     result = deepcopy(context)
     count = _token_counter() if context.get("max_tokens") is not None else None
     reasons = dict(omission_reasons or {})
     while True:
+        if evidence_registry is not None:
+            evidence_registry.stamp(result)
         reasons.update({row["chunk_id"]: row["reason"] for row in result["omitted_evidence"]})
         shown = set(result["allowed_citation_ids"])
         result["candidate_locations"] = [{**{key: deepcopy(row[key]) for key in

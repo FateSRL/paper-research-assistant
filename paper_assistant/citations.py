@@ -190,3 +190,74 @@ def validate_citations(draft: AnswerDraft | dict, context: dict, store, *, proje
     result["evidence_refs"] = [EvidenceRef.model_validate({field: source[field] for field in _REF_FIELDS})
                                .model_dump(mode="json") for source in sources.values()]
     return result
+
+
+def validate_prose_citations(text, refs, context, store, *, project_root: Path) -> dict:
+    """Resolve [ID:n] once, retaining every occurrence and deduped sources."""
+    from paper_assistant.prose import parse_markers
+
+    result = {"status": "valid", "checks": [], "citations": [],
+              "evidence_refs": [], "evidence_sources": [], "error": None}
+    try:
+        checked_context = deepcopy(context)
+        build_messages(checked_context.get("question") if isinstance(checked_context, dict) else None,
+                       checked_context)
+    except Exception:
+        result.update(status="tool_error", error={"code": "invalid_context", "message": _ERROR_MESSAGE})
+        return result
+    by_ref = {row["ref"]: row for row in refs if isinstance(row, dict)
+              and type(row.get("ref")) is int and isinstance(row.get("chunk_id"), str)}
+    snapshots = {item["chunk_id"]: item for item in checked_context["shown_evidence"]}
+    allowed = set(checked_context["allowed_citation_ids"])
+    chunk_cache, pdf_cache, sources = {}, {}, {}
+    failures = []
+    for marker in parse_markers(text):
+        ref = marker["ref"]
+        source_ref = by_ref.get(ref)
+        chunk_id = source_ref["chunk_id"] if source_ref else None
+        status, code = "valid", None
+        if source_ref is None:
+            status, code = "invalid_output", "citation_unknown_ref"
+        elif chunk_id not in allowed or chunk_id not in snapshots:
+            status, code = "invalid_output", "citation_not_shown"
+        else:
+            if chunk_id not in chunk_cache:
+                try:
+                    stored = store.get_chunk(chunk_id)
+                except Exception:
+                    chunk_cache[chunk_id] = ("tool_error", "source_lookup_failed", None)
+                else:
+                    if stored is None:
+                        chunk_cache[chunk_id] = ("tool_error", "source_missing", None)
+                    else:
+                        try:
+                            source = _checked_source(stored, snapshots[chunk_id], project_root, pdf_cache)
+                        except _SourceError as error:
+                            chunk_cache[chunk_id] = ("tool_error", error.code, None)
+                        except Exception:
+                            chunk_cache[chunk_id] = ("tool_error", "source_record_invalid", None)
+                        else:
+                            chunk_cache[chunk_id] = ("valid", None, source)
+            status, code, source = chunk_cache[chunk_id]
+            if status == "valid":
+                if chunk_id not in sources:
+                    origins = [deepcopy(row) for row in checked_context.get("reading_origins", [])
+                               if row.get("chunk_id") == chunk_id]
+                    if origins:
+                        source["reading_origins"] = origins
+                    source["ref"] = ref
+                    sources[chunk_id] = source
+                result["citations"].append({"index": marker["index"], "position": marker["position"],
+                                            "ref": ref, "chunk_id": chunk_id})
+        result["checks"].append({"claim_index": 0, "citation_index": marker["index"],
+                                 "ref": ref, "chunk_id": chunk_id, "status": status, "code": code})
+        if status != "valid":
+            failures.append((status, code))
+    if failures:
+        status, code = next((item for item in failures if item[0] == "tool_error"), failures[0])
+        result.update(status=status, error={"code": code, "message": _ERROR_MESSAGE})
+        return result
+    result["evidence_sources"] = deepcopy(list(sources.values()))
+    result["evidence_refs"] = [EvidenceRef.model_validate({field: source[field] for field in _REF_FIELDS})
+                               .model_dump(mode="json") for source in sources.values()]
+    return result

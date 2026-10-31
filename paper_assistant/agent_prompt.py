@@ -147,8 +147,20 @@ and uncertainty. Shortening must not add a new technical label or stronger claim
 
 
 # Core extraction clauses adapted directly from RAGFlow tree/claims.go.
+JAVASCRIPT_TOOL_RULES = """run_javascript is an optional local calculation tool for
+values already present in this conversation: arithmetic, differences, ratios,
+sorting, counting and aggregation. It is not search and not new paper evidence.
+Write results with console.log, derive them from supplied values, and do not use
+it to print a known conclusion, narrate reasoning or restate the question.
+Calculated results are intermediate; cite the original input chunks, not the
+calculation. No files, network, database, environment, Python objects or Node
+modules are available. Each call is independent and bounded.
+"""
+
+
 FACT_PREPARATION_RULES = """For a selected-paper answer, return prepare_answer instead of a complete answer.
-Extract only the explicit facts needed by the current question from visible originals.
+Extract only the explicit facts needed by the current question from the originals
+already provided in this conversation.
 A fact must be:
 - Self-contained: readable without surrounding text, with named subjects. Resolve
   referents to their names; never use a bare pronoun or vague document attribution.
@@ -161,28 +173,54 @@ A fact must be:
   alternatives, applicable conditions, scope, exceptions and modal qualifiers
   such as can, may and only if. Do not strengthen a listed available route into
   something the authors actually used universally.
-Preserve numbers, units, dates, names and qualifiers exactly. Keep facts in the
-source language. Each fact uses basis=paper_evidence, citation_ids and evidence_quotes.
+Before writing a fact, read the provided originals to confirm its complete
+subject, relation, conditions and qualifiers. Preserve numbers, units, dates,
+names and qualifiers exactly. Keep facts in the source language. Preserve the
+source's technical meaning in each fact and in missing_information: when the
+source only describes a representation, mechanism or condition without giving a
+more specific technical category, keep that description instead of adding a more
+specific category from familiarity. Each fact uses basis=paper_evidence, citation_ids and evidence_quotes.
 Each quote MUST be a concise CONTIGUOUS verbatim substring of its exact cited
 chunk: same words and order, no paraphrase, no added words or spliced sentences.
 For tables keep raw cell/row separators and order. Bind each quote to its real
-chunk_id; keep quotes under 240 characters. This is a preparation instruction,
-not a claim that a downstream semantic or quote matcher has verified it.
+chunk_id; keep quotes under 240 characters. A fact may need more than one visible
+chunk. When the complete subject or relation is supplied across chunks or pages,
+list every chunk that actually supplies a necessary part in citation_ids, and bind
+a separate continuous quote to each chunk. Do not state a subject learned from one
+chunk while citing only its continuation, splice text from different chunks into
+one quote, or attribute a quote to another chunk. If one chunk alone fully supports
+the fact, cite only that necessary chunk; adjacency, a shared parent or the same
+page alone does not make another chunk a supporting source. This is a preparation
+instruction, not a claim that a downstream semantic or quote matcher has verified it.
 Do not guess unreadable relations or normalize uncertain symbols into certain
 relations. Preserve original wording and describe local uncertainty in
 missing_information. Optional unreadable details do not block readable core facts.
 facts contains supported paper facts only, not analysis, world knowledge or a
-finished answer. answerable declares whether these facts cover the core question.
-Judge it against what the original question asks: do not make an unasked formal
-algorithm, complete inventory, exact count, extra experiment or background
-detail a required fact. If the shown facts answer the asked source, relation or
-condition, mark answerable=true and keep optional limitations in
-missing_information. If a core fact is absent, set answerable=false and name the
-specific gap in missing_information; the program returns to existing
-search/read_context when steps and evidence calls remain. The next gap_evidence_decision permits native
-search/read_context or the explicit insufficient_evidence action, not another
-preparation on unchanged originals. When core
-facts suffice, answerable=true; retain any local uncertainty in missing_information.
+finished answer. A calculated comparison, difference, ranking or aggregate is not
+an author fact and must not be given a fabricated quote or presented as a verbatim
+source statement. You may call run_javascript for such a calculation over values
+already present; tool use is optional and does not create a paper fact.
+answerable declares whether these facts cover the core question.
+Judge it against what the original question actually asks: the asked objects,
+relations, conditions and necessary parallel items are core. If any of those is
+still absent and a concrete search/reading direction plus steps or evidence calls
+remain, set answerable=false and name the specific missing item in
+missing_information; the program returns to existing search/read_context. When the
+baseline, objects, metric, unit and necessary values are already present, a
+comparison or ranking that follows by calculation can cover the asked relation;
+the absence of the authors' own written ranking is not by itself a missing input.
+If a necessary input is absent, continue search/reading; if the inputs are present
+and only the arithmetic is missing, do not refuse solely because no new retrieval
+direction remains. Topic
+relevance, a successful tool call, a new chunk or a larger fact count does not by
+itself make the evidence sufficient. An unasked whole-paper inventory, an exact
+global count, background detail, an extra experiment or metric, or a formal proof
+is optional and must not block a supported answer. A normal causal/why question
+asks for the paper's supported reasons, not a formal necessity proof; an
+experiment question refers to the paper's own experiments, not a future proposal
+or a separately titled list. When the core facts suffice, mark answerable=true
+and keep optional limitations in missing_information. Do not force another
+search/read_context when the current originals already cover the asked relation.
 At the step/evidence limit prepare the available facts and specific gap, without
 requesting tools. Each preparation consumes the current autonomous step.
 Direct AnswerAction is allowed only when answer appears in allowed_actions,
@@ -200,8 +238,9 @@ prepared points and gaps; use it to organize the answer, but treat it as neither
 authoritative nor exhaustive. When a prepared statement and the originals differ,
 the originals govern. You may add a necessary fact that the preparation omitted
 when those originals support it, citing the chunk that contains it. Only chunks
-actually shown in that evidence_sections and listed in this call's
-allowed_citation_ids are citable; candidate locations and unshown chunks are not.
+actually shown in the evidence_sections provided in this conversation and listed
+in this call's allowed_citation_ids are citable; candidate locations and unshown
+chunks are not.
 Do not rely on an earlier answer or world knowledge about a missing paper fact.
 Preserve subjects, relations, numerical conditions, modality, negation,
 attribution, alternatives and qualifiers. Do not invent new category groups,
@@ -221,85 +260,46 @@ direct_answer in this same response. No review or rewriting stage follows this
 generation.
 """
 
-AUTONOMOUS_PROMPT_VERSION = "v2.16-coverage-preserving-evidence-v1"
-FINAL_FACT_PROMPT_VERSION = "v2.17-original-history-final-answer-v1"
-AUTONOMOUS_SYSTEM_PROMPT = AGENT_COMMON_PROMPT.replace(
-    "Return exactly one JSON object with an action from allowed_actions and only\n"
-    "the fields in its action_contract. Do not wrap the JSON in Markdown or put\n"
-    "extra text outside it. Do not provide private chain of thought.",
-    "For evidence use native search or read_context tool calls, never text tool JSON. You may call tools "
-    "multiple times in one response; each call is executed in order and receives its own result. "
-    "Without tool calls, return prepare_answer for paper facts, analysis or evidence gaps. "
-    "Only when answer is explicitly allowed may a pure general-knowledge or conversation response use AnswerAction. "
-    "Follow the current action_contracts, without Markdown or extra text. Do not provide private chain of thought.") + "\n" + FACT_PREPARATION_RULES + """
-Choose the next actual action yourself, including the first action. Use search
-only when a useful paper fact is missing; prepare facts when paper evidence suffices.
-When the question needs a selected-paper fact that current shown_evidence does
-not support, choose search when allowed, then prepare facts from the returned current
-evidence. Planning titles or abstracts alone cannot support paper_evidence.
-For facts outside the selected papers, such as a project's release date, a
-direct answer may explain why the requested fact cannot be determined from the
-current evidence. Add verification advice only if the user requests it. Do not assert that no date has
-been set or that an unread paper never contains the fact. Do not force a paper
-citation for an unrelated fact, invent IDs or change a paper fact's basis to
-model_knowledge merely to make the output pass.
-planned_queries are editable suggestions, never a queue that must be executed.
-For native search, supply query, a nonempty selected_versions subset and
-missing_information naming the particular requested fact still needed. The
-current question determines its object, relation and conditions. Translate,
-complete terminology or compress a long question only as needed for retrieval;
-use the paper's language when helpful. An overview may need the paper's goal or
-title, but titles are not a mandatory prefix. Specific relations do not create
-new experimental conditions or comparisons. Planned queries are suggestions,
-not an answer outline or a queue. Preserve every original source constraint.
-The same query on different selected papers is allowed. Repeating the same
-query and version subset returns a duplicate observation without retrieval.
-executed_actions and native tool history contain each earlier missing_information
-and its actual observation. After reading the returned originals, determine
-whether that requested fact was obtained. Topic relevance, a success observation
-or a new chunk alone does not establish an answer. Keep the gap directed at the
-original relation instead of replacing it with a module's usage workflow. If
-only a workflow is known while its source or selection conditions remain
-missing, search for that missing fact or read a promising nearby parent via
-read_context. When the evidence covers the original request, prepare its facts for final generation.
-If no concrete retrieval direction remains or the budget is reached, explain
-the specific gap under the existing answer protocol. A desire to add another
-mechanism is not a missing answer fact. Use a definition only when that mechanism
-is necessary for what the user asked.
-The directory contains saved original section names and page locations only;
-it is not evidence and its parent_ids are never citations. Only children visible
-in evidence_sections may be cited. Tool observations locate their originals in
-the current evidence_sections, where each body appears once by paper and section.
-At most five model-initiated search/read_context calls share the same quota;
-observe remaining_evidence_calls. Automatic parent continuation is not a tool call.
-Each ordinary decision consumes one autonomous step, independently of request
-retries or repairs. Observe remaining_steps and autonomous_step_limit. At the
-limit_final_decision prepare available facts for paper questions: complete the requested supported
-findings and evidence gaps; a gap statement alone may suffice. Preserve any
-mechanism or analysis the user explicitly requested, within the evidence scope.
-Cite only this call's allowed_citation_ids; IDs from earlier observations may
-have been omitted from the current context and are then unavailable to cite.
-candidate_locations contains actual tool-returned but currently undisplayed
-chunks: IDs, owning versions, page/section, saved parent and omission reason only.
-These locations are not read evidence and cannot be cited. For a promising known
-chunk use read_context with chunk_id and missing_information naming the needed
-fact. This reads only that saved original, no neighbors; parent_id reading remains
-available for a wider original context. Already sufficient visible text need not
-be read again. A tool return does not mean its text fit the evidence window.
-In gap_evidence_decision, use native search/read_context for the saved preparation's
-specific missing_information, or return {"action":"insufficient_evidence",
-"reason":"why current scoped tools, already-read candidates or available clues offer no reliable further direction"}.
-A missing fact alone is not a no-direction reason: explain why the available
-reading/search leads cannot usefully fill it. This declaration is not semantic
-verification. Repeating prepare_answer is not a stop decision and is not allowed
-in this state. A failed/duplicate tool call or no_new_shown_evidence keeps this
-state; only actually newly displayed originals reopen preparation. At the fifth
-step or evidence cap, prepare available facts and the remaining gap instead of
-exploring further. insufficient_evidence is allowed only in gap_evidence_decision
-and only consumes the saved preparation into the existing final generation.
-Cover the original complete question, including each comparison or requested
-aspect. Do not provide private chain of thought.
-""" + "\n" + ANSWER_ORGANIZATION_INSTRUCTION
+AUTONOMOUS_PROMPT_VERSION = "v3.0-native-tool-loop-v1"
+FINAL_FACT_PROMPT_VERSION = "v2.19-history-final-answer-v1"
+PROSE_FINAL_PROMPT_VERSION = "v4.0-direct-prose-final-v1"
+# RAGFlow conf/agentic_rag.yaml and helper.go: handles live beside originals.
+STABLE_REF_RULES = """Each original passage has a stable integer ref for this question.
+In the final prose, [ID:n] must use the very same n printed beside that original.
+Only originals retained in this request's conversation and allowed_refs are
+citable; directories, candidate locations and planning material grant no refs.
+Refs can be non-contiguous and are not source-list positions. A paper's own
+bibliography [5] differs from a passage with ref=9: cite that passage as [ID:9],
+while preserving its bibliography [5] as ordinary text. Never guess a mapping.
+"""
+# Adapted from RAGFlow agentic_rag/agent.go: native tools or final prose,
+# recoverable tool/output errors return to this same loop, not a facts phase.
+AUTONOMOUS_SYSTEM_PROMPT = AGENT_COMMON_PROMPT.split("Return exactly one JSON object")[0].replace(
+    "allowed_citation_ids", "allowed_refs").replace("shown_evidence", "evidence_sections") + """
+Use native search/read_context for needed evidence and run_javascript for optional
+local calculations over provided values. Return native tool calls, or one complete
+final answer as natural-language prose in the user's requested language. There is
+no preparation action, facts JSON or mandatory second answer generation.
+End each paper-backed statement with its supporting [ID:n] handles. Pure analysis
+may omit handles, but its paper premises need their actual sources.
+Stop collecting when the requested facts, relations, conditions and necessary
+parallel items are supported; if evidence is insufficient, answer supported parts
+and state the concrete gap. Tool errors are observations: correct arguments, use
+another available lead, or answer from actual originals. Do not repeat the same
+failed network operation yourself; the client already performs permitted retries.
+Search queries use the paper's language and target the original request. Planned
+queries are optional suggestions, not a queue or a required answer outline.
+read_context accepts an actually known candidate chunk_id or a displayed directory
+parent_id. Candidate locations and directory captions locate originals; only
+actual text in evidence_sections grants citation authority. Reordering and repeated
+reads retain the same ref. Removed originals are not citable.
+Choose the next tool or final answer yourself within remaining_rounds; each model
+turn, including correction, consumes a round. Multiple native tools can share a
+turn. No independent search/read quota is imposed. Never output a tool call as
+text or an AgentAction JSON envelope. Do not concatenate process narration into
+the final answer. A completed tool-free response is the deliverable itself.
+""" + STABLE_REF_RULES + JAVASCRIPT_TOOL_RULES + ANSWER_ORGANIZATION_INSTRUCTION.replace(
+    "claims and any requested direct_answer", "the answer")
 
 
 def _contracts(actions):
@@ -400,8 +400,27 @@ AnswerAction with the existing claims, citations and short quotes. No review or
 rewriting stage follows this generation.
 """
 
-FIXED_PREPARE_PROMPT_VERSION = "v2.16-fixed-evidence-preparation-v1"
-FIXED_FINAL_PROMPT_VERSION = "v2.17-original-history-normal-full-answer-v1"
+FINAL_SOURCE_AND_TERM_RULES = """Preserve the prepared and original technical meaning
+throughout facts, comparisons, lists and analysis. When the originals only
+describe a representation or mechanism without naming a more specific technical
+category, keep the description; do not add a more specific technical category
+for summary convenience. If the prepared facts already answer the asked relation,
+do not add a summarizing restatement that merely renames them. Keep a requested
+explanation, comparison or inference, but its paper premises must use the same
+technical meaning as the originals.
+Each final claim's citation_ids must support that claim's complete content. When
+you merge multiple prepared facts into a comparison, list, explanation or other
+combined claim, retain every source needed for the whole merged claim. A chunk
+cited by another claim does not support this claim, and do not add adjacent,
+sibling or same-page IDs that are not necessary. Prepared citations are not
+audited conclusions: use the replayed originals to add a missing necessary
+visible source when they support the whole claim, or state only the supported
+part and the specific gap. Keep each short quote continuous within its own
+chunk; never splice different chunks into one quote.
+"""
+
+FIXED_PREPARE_PROMPT_VERSION = "v2.20-shared-sufficiency-v1"
+FIXED_FINAL_PROMPT_VERSION = "v2.18-normal-term-citation-answer-v1"
 FIXED_PREPARE_RULES = """The evidence_sections, their text, order, source metadata and
 allowed_citation_ids are fixed for this run. Do not call or request search or
 read_context and do not claim a tool result. Return exactly one prepare_answer.
@@ -415,7 +434,8 @@ FIXED_PREPARE_SYSTEM_PROMPT = (
     + "\n" + FACT_PREPARATION_RULES + "\n" + FIXED_PREPARE_RULES
     + "\n" + CONVERSATION_INSTRUCTION.replace("shown_evidence", "evidence_sections"))
 FIXED_FINAL_SYSTEM_PROMPT = (
-    NORMAL_FINAL_FACT_ANSWER_RULES + "\n" + NORMAL_ANSWER_RULES + "\n"
+    NORMAL_FINAL_FACT_ANSWER_RULES + "\n" + FINAL_SOURCE_AND_TERM_RULES + "\n"
+    + NORMAL_ANSWER_RULES + "\n"
     + NORMAL_ANSWER_ORGANIZATION_INSTRUCTION + "\n"
     + CONVERSATION_INSTRUCTION.replace("shown_evidence", "prepared originals"))
 
@@ -464,9 +484,110 @@ def _replay_prepared_history(system, prepared_messages, prepared_response, paylo
             {"role": "user", "content": json.dumps(payload, ensure_ascii=False, allow_nan=False)}]
 
 
-def _prepared_final_payload(question, context, *, prompt_version, answer_contract,
-                            conversation_context=None, source_requirement=None,
-                            missing_information=None, extra_payload=None):
+PROSE_FINAL_SYSTEM_PROMPT = """You are a bounded assistant for selected papers.
+Answer the user's original question in one complete natural-language response.
+Use the current original passages and their stable refs. Those originals govern
+over previous model summaries. Do not use world knowledge to fill a missing paper fact, do not add
+unrelated findings. When run_javascript is available, you may use it for arithmetic,
+sorting, counting or aggregation over values already provided. Tool use is optional;
+the code must derive its output from those values, not print a known conclusion.
+Do not search or read new evidence in this phase. After any calculation, give the
+complete natural-language answer; do not narrate or promise future tool use.
+Preserve subjects, relations, numbers, units, dates, modality, negation,
+attribution, alternatives and qualifiers. Preserve the original precision; do
+not round intermediate calculations. If the provided evidence does not establish
+a requested paper fact, say plainly what is missing and what cannot be determined;
+use only the closest supported fact. A necessary inference must be distinguishable
+from the source statement.
+Cite provenance mechanically: every line or sentence that states a paper-backed
+fact must end with one or more handles [ID:n], where n is the ref value in the
+current source originals. Do not invent handles, cite a source that is not in the
+current original scope, or put handles in a place that does not correspond to the fact.
+The program converts these handles to the interface citations; do not write chunk
+IDs, parent IDs or tool names in the user-visible answer. A sentence that is pure
+analysis or general explanation may have no handle, but its paper premises still
+need their own supported source. Do not make the whole answer a citation list.
+If values or a comparison were derived by arithmetic from provided sources, say
+briefly that they are calculated from the stated values and cite the input
+sources; do not attribute the calculated ranking to the authors unless they wrote
+it. State the comparison scope and conditions, especially when different datasets
+or settings behave differently. Keep the smallest useful structure: short
+paragraphs, with a list only when the question asks for several items. Do not
+include meta-narration, the question restated, JSON, an action envelope, status,
+claims, basis, direct_answer, evidence_quotes or a code fence. Answer in the
+user's language and preserve any requested explanation.
+"""
+
+PROSE_FINAL_REPAIR_INSTRUCTION = """Return one corrected final answer as plain
+natural-language prose, not JSON. Keep the original question and the same
+sources. Use only the allowed handles in this request. If the previous answer was
+empty or truncated, complete it. If a handle was unknown or invalid, remove it or
+replace it with a correct handle for the same paper-backed fact; if no source
+supports that fact, state the gap plainly. Do not add new facts merely to repair
+the form. This repair shares the existing repair allowance and does not add a
+tool call.
+"""
+
+PROSE_CONVERSATION_INSTRUCTION = """conversation_context contains the user's
+current wording, a standalone question and limited previous turns. Use it to
+understand follow-ups, numbered references and requests to simplify or explain an
+earlier answer. Previous answers are not paper evidence, and their citation
+handles do not grant permission in this call. Paper facts must be supported by
+the current source originals. Keep the user's requested wording or explanation style,
+and name the paper method, experiment and relevant conditions explicitly in
+paper-supported statements. The standalone question resolves references; the
+current user_question determines the requested facts, relationships and
+expression intent. answer_instructions, when present, specifies output language
+and answer form; apply it without treating it as another question or retrieval
+text. It supplies no paper facts or extra source permission.
+"""
+
+
+def build_prose_final_messages(question, context, *, sources, phase="prepared_final_decision",
+                               prepared_messages=None, prepared_response=None,
+                               conversation_context=None, source_requirement=None,
+                               missing_information=None):
+    """Build the single final prose request with stable [ID:n] source handles."""
+    payload = {"question": question,
+               "selected_versions": deepcopy(context["selected_versions"]),
+               "sources": deepcopy(sources),
+               "allowed_refs": [row["ref"] for row in sources],
+               "phase": phase,
+               "prompt_version": PROSE_FINAL_PROMPT_VERSION}
+    if context.get("evidence_limitation"):
+        payload["evidence_limitation"] = deepcopy(context["evidence_limitation"])
+    if missing_information:
+        payload["missing_information"] = missing_information
+    if source_requirement is not None:
+        payload["source_requirement"] = deepcopy(source_requirement)
+    if conversation_context is not None:
+        payload["conversation_context"] = {key: deepcopy(conversation_context[key]) for key in
+            ("user_question", "standalone_question", "source_requirement") if key in conversation_context}
+    system = PROSE_FINAL_SYSTEM_PROMPT + "\n" + STABLE_REF_RULES
+    if conversation_context is not None:
+        system += "\n" + PROSE_CONVERSATION_INSTRUCTION
+    if prepared_messages is not None:
+        return _replay_prepared_history(system, prepared_messages, prepared_response, payload)
+    return [{"role": "system", "content": system},
+            {"role": "user", "content": json.dumps(payload, ensure_ascii=False, allow_nan=False)}]
+
+
+def build_prose_repair_messages(messages, previous, *, error_code, allowed_refs):
+    """One prose repair; never returns to AnswerAction or JSON parsing."""
+    if not isinstance(messages, list) or not messages:
+        raise ContextError("invalid_final_history", "最终正文修复缺少原请求")
+    repaired = deepcopy(messages)
+    if isinstance(previous, str) and previous.strip():
+        repaired.append({"role": "assistant", "content": previous})
+    repaired.append({"role": "user", "content": json.dumps({
+        "request": "repair_final_prose", "phase": "prepared_final_decision",
+        "error_code": error_code, "allowed_refs": list(allowed_refs),
+        "instruction": PROSE_FINAL_REPAIR_INSTRUCTION,
+    }, ensure_ascii=False, allow_nan=False)})
+    return repaired
+
+
+
     """Current final rules and complete visible citation permission, no copied body."""
     payload = {"question": question,
                "selected_versions": deepcopy(context["selected_versions"]),
@@ -509,11 +630,39 @@ def build_prepared_final_messages(question, context, preparation, *, prepared_me
         conversation_context=conversation_context, source_requirement=source_requirement,
         missing_information=preparation.get("missing_information") or None)
     system = (FINAL_FACT_ANSWER_RULES + "\n"
+              + FINAL_SOURCE_AND_TERM_RULES + "\n"
               + AGENT_ANSWER_RULES.replace("shown_evidence", "the provided originals")
               + "\n" + ANSWER_ORGANIZATION_INSTRUCTION)
     if conversation_context is not None:
         system += "\n" + CONVERSATION_INSTRUCTION.replace("shown_evidence", "the provided originals")
     return _replay_prepared_history(system, prepared_messages, prepared_response, payload)
+
+
+def _prepared_final_payload(question, context, *, prompt_version, answer_contract,
+                            conversation_context=None, source_requirement=None,
+                            missing_information=None, extra_payload=None):
+    """Current final rules and complete visible citation permission, no copied body."""
+    payload = {"question": question,
+               "selected_versions": deepcopy(context["selected_versions"]),
+               "allowed_citation_ids": list(context["allowed_citation_ids"]),
+               "phase": "prepared_final_decision", "terminal_only": True,
+               "allowed_actions": ["answer"],
+               "action_schema_version": AUTONOMOUS_ACTION_SCHEMA_VERSION,
+               "prompt_version": prompt_version,
+               "action_contracts": {"answer": deepcopy(answer_contract)}}
+    if context.get("evidence_limitation"):
+        payload["evidence_limitation"] = deepcopy(context["evidence_limitation"])
+    if missing_information:
+        payload["missing_information"] = missing_information
+    if source_requirement is not None:
+        payload["source_requirement"] = deepcopy(source_requirement)
+    if conversation_context is not None:
+        payload["conversation_context"] = {key: deepcopy(conversation_context[key]) for key in
+            ("user_question", "standalone_question", "answer_instructions", "source_requirement")
+            if key in conversation_context}
+    if extra_payload:
+        payload.update(deepcopy(extra_payload))
+    return payload
 
 
 def build_fixed_final_messages(question, context, preparation, *, prepared_messages,
@@ -535,8 +684,20 @@ def build_fixed_final_messages(question, context, preparation, *, prepared_messa
 def build_agent_messages(question: str, context: dict, *, phase: str,
                          terminal_only: bool = False, source_requirement=None,
                          paper_information=None, conversation_context=None,
-                         loop_state=None) -> list[dict[str, str]]:
-    """Validate old snapshot invariants, replace D5 protocol, add phase data."""
+                         loop_state=None, new_evidence_ids=None) -> list[dict[str, str]]:
+    """Validate old snapshot invariants, replace D5 protocol, add phase data.
+
+    In the autonomous conversation path, ``new_evidence_ids`` limits the
+    current payload to originals that were not already provided in earlier
+    messages. ``allowed_citation_ids`` remains the complete range actually
+    retained in the conversation, so earlier bodies stay citable without being
+    copied into every request.
+    """
+    if loop_state is not None:
+        return build_react_messages(question, context, paper_information=paper_information or [],
+            conversation_context=conversation_context, history=[],
+            remaining_rounds=loop_state.get("remaining_steps", 0), new_evidence_ids=new_evidence_ids,
+            source_requirement=source_requirement)
     # The D5 system only allows AnswerDraft, so retain just its checked user
     # payload. Never stack the old and new competing output instructions.
     base = build_messages(question, deepcopy(context), conversation_context=conversation_context)
@@ -547,36 +708,11 @@ def build_agent_messages(question: str, context: dict, *, phase: str,
     payload["reading_origins"] = deepcopy(context.get("reading_origins", []))
     permitted = allowed_actions(phase=phase, has_shown_evidence=bool(payload["shown_evidence"]),
                                 terminal_only=terminal_only, prepare_answer=loop_state is not None)
-    if context.get("max_tokens") is None and len(payload["shown_evidence"]) > (5 if phase == "initial_decision" else 8):
-        raise ContextError("invalid_agent_evidence_count", "当前阶段展示证据条数超限")
     payload.update(phase=phase, allowed_actions=list(permitted), terminal_only=terminal_only,
                    action_schema_version=ACTION_SCHEMA_VERSION,
                    prompt_version=SCOPED_AGENT_PROMPT_VERSION if source_requirement is not None else AGENT_PROMPT_VERSION,
                    action_contracts=_contracts(permitted))
     system = AGENT_SYSTEM_PROMPT
-    if loop_state is not None:
-        payload.update(deepcopy(loop_state))
-        payload["prompt_version"] = AUTONOMOUS_PROMPT_VERSION
-        payload["action_schema_version"] = AUTONOMOUS_ACTION_SCHEMA_VERSION
-        payload["action_contracts"] = _contracts(tuple(
-            action for action in permitted if action in ("answer", "prepare_answer", "insufficient_evidence")))
-        if "answer" in payload["action_contracts"]:
-            direct_contract = payload["action_contracts"]["answer"]
-            direct_contract["shape"]["answer"]["claims"][0] = {
-                "evidence_quotes": [], "claim": "a general-knowledge or pure-conversation answer",
-                "basis": "model_knowledge", "citation_ids": []}
-            direct_contract["scope"] = (
-                "Pure general knowledge or conversation only; every claim must use model_knowledge "
-                "with no citation_ids or evidence_quotes. Selected-paper facts, analysis and evidence "
-                "gaps require prepare_answer, not answer.")
-        if "search" in payload["allowed_actions"]:
-            payload["allowed_actions"].append("read_context")
-        sections, papers = autonomous_evidence_view(context, paper_information or [])
-        payload.pop("shown_evidence")
-        payload["evidence_sections"] = sections
-        payload["candidate_locations"] = deepcopy(context.get("candidate_locations", []))
-        payload["selected_papers"] = papers
-        system = AUTONOMOUS_SYSTEM_PROMPT.replace("shown_evidence", "evidence_sections")
     if conversation_context is not None:
         system += "\n" + CONVERSATION_INSTRUCTION
     return [{"role": "system", "content": system},
@@ -588,7 +724,8 @@ def build_action_repair_messages(question: str, context: dict, previous_content:
                                  repair_kind: str = "format", source_requirement=None,
                                  paper_information=None, conversation_context=None,
                                  loop_state=None, field_issues=None,
-                                 prepared_final_messages=None) -> list[dict[str, str]]:
+                                 prepared_final_messages=None,
+                                 base_messages=None) -> list[dict[str, str]]:
     """Construct one repair request; caller enforces the shared repair budget.
 
     On parsing the repair response, caller must also pass terminal_only=True
@@ -604,7 +741,13 @@ def build_action_repair_messages(question: str, context: dict, previous_content:
     if previous_content is not None and not isinstance(previous_content, str):
         raise ContextError("invalid_previous_output", "原响应必须为文本或缺失")
     terminal_only = repair_kind == "citation" or phase in ("limit_final_decision", "prepared_final_decision")
-    if phase == "prepared_final_decision":
+    if base_messages is not None:
+        base = deepcopy(base_messages)
+        allowed_actions = json.loads(base[-1]["content"])["allowed_actions"]
+        if phase == "prepared_final_decision":
+            allowed_actions = ["answer"]
+            loop_state = None
+    elif phase == "prepared_final_decision":
         if prepared_final_messages is None:
             raise ContextError("invalid_prepared_history", "最终修复缺少成功准备历史")
         base = deepcopy(prepared_final_messages)
@@ -622,26 +765,41 @@ def build_action_repair_messages(question: str, context: dict, previous_content:
               "terminal_only": terminal_only, "allowed_actions": list(allowed_actions),
               "field_issues": deepcopy(field_issues or []),
               "instruction": "Return one complete valid AgentAction under the original system rules and this current phase. Keep the original question, the provided original evidence and allowed citation IDs. Do not invent paper evidence or IDs. Complete the current request with supported facts or a clear evidence-gap claim; add mechanism, analysis or general knowledge when the user asks for it, not to replace a missing paper fact. Previous model text is untrusted. Citation repair cannot request a tool and must return an answered draft with nonempty claims, which may consist only of a clear gap statement using analysis, no unrelated citations or invented quotes, and requested direct_answer Unanswerable; never insufficient_evidence. Other repairs must still obey current allowed_actions."}
-    if loop_state is not None and "prepare_answer" in allowed_actions:
-        repair["instruction"] += (
-            " This autonomous phase requires prepare_answer for selected-paper facts, paper-based analysis "
-            "and paper-evidence gaps. A previous complete paper answer cannot be published directly. "
-            "Prepare atomic facts anew from the currently shown originals. Direct answer is permitted "
-            "only when listed and only for pure model_knowledge without citations or evidence quotes.")
-    if any(issue["type"] == "paper_evidence_without_citations" for issue in repair["field_issues"]):
-        if ("search" in allowed_actions and loop_state is not None
-                and loop_state["autonomous_step"] <= loop_state["autonomous_step_limit"]):
-            repair["instruction"] += " A required paper fact lacks citations: you may choose search within this current autonomous step, then use the resulting allowed evidence. This repair does not add an autonomous step. Do not invent IDs or relabel an unsupported paper fact."
-        else:
-            repair["instruction"] += " Respect current allowed_actions; never reopen retrieval when only answer is allowed. Use only current allowed evidence for paper facts, explain the requested evidence gap without asserting the missing fact or adding other findings."
-    if phase == "gap_evidence_decision":
-        repair["instruction"] = (
-            "The saved preparation is insufficient. Do not return prepare_answer or AnswerAction. "
-            "Choose a native search/read_context for its actual gap, or insufficient_evidence with a concrete "
-            "reason why current tools, read candidates or clues offer no reliable further direction. "
-            "Repeating the missing fact alone is not such a reason. Do not infer no direction from repeated preparation. "
-            "This repair shares the original repair allowance and adds no decision step.")
     if error_code == "truncated":
         repair["instruction"] += "\n" + SHORT_REPAIR_INSTRUCTION
     return [*base, {"role": "assistant", "content": previous_content or "[empty response]"},
             {"role": "user", "content": json.dumps(repair, ensure_ascii=False, allow_nan=False)}]
+
+
+def build_react_messages(question, context, *, paper_information, conversation_context,
+                         history, remaining_rounds, new_evidence_ids=None, synthesis=False, source_requirement=None):
+    """One native loop, or a single no-tool synthesis using current originals."""
+    # Reuse the existing snapshot contract; the model sees originals with refs.
+    build_messages(question, deepcopy(context))
+    view = deepcopy(context)
+    if new_evidence_ids is not None and not synthesis:
+        wanted = set(new_evidence_ids)
+        view["shown_evidence"] = [row for row in view["shown_evidence"] if row["chunk_id"] in wanted]
+    sections, papers = autonomous_evidence_view(view, paper_information)
+    payload = {"question": question, "selected_versions": deepcopy(context["selected_versions"]),
+        "evidence_sections": sections, "selected_papers": papers,
+        "allowed_refs": list(context.get("allowed_refs", [])),
+        "candidate_locations": deepcopy(context.get("candidate_locations", [])),
+        "remaining_rounds": remaining_rounds, "prompt_version": AUTONOMOUS_PROMPT_VERSION,
+        "action_schema_version": AUTONOMOUS_ACTION_SCHEMA_VERSION}
+    if source_requirement is not None:
+        payload["source_requirement"] = deepcopy(source_requirement)
+    if context.get("evidence_limitation"):
+        payload["evidence_limitation"] = context["evidence_limitation"]
+    if conversation_context is not None:
+        payload["conversation_context"] = deepcopy(conversation_context)
+    if synthesis:
+        payload.update(phase="synthesis", prompt_version=PROSE_FINAL_PROMPT_VERSION)
+        system = PROSE_FINAL_SYSTEM_PROMPT + "\n" + STABLE_REF_RULES + (
+            "\nThe research loop has ended. No tools are available. Give one complete answer "
+            "using only the current originals and completed calculations; distinguish unsupported "
+            "parts and their concrete evidence gaps. Do not promise further work.")
+    else:
+        system = AUTONOMOUS_SYSTEM_PROMPT
+    return [{"role": "system", "content": system}, *deepcopy(history),
+        {"role": "user", "content": json.dumps(payload, ensure_ascii=False, allow_nan=False)}]

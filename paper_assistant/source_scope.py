@@ -147,7 +147,7 @@ def attach_source_requirement(messages, original_question, requirement):
         _fail("invalid_source_messages")
     snapshot = {"question": original_question, "selected_versions": versions,
                 "shown_evidence": shown, "allowed_citation_ids": payload.get("allowed_citation_ids"),
-                "max_chars": 8000, "shown_chars": sum(len(m.get("shown_text", "")) for m in shown if isinstance(m, dict)),
+                "max_chars": None, "shown_chars": sum(len(m.get("shown_text", "")) for m in shown if isinstance(m, dict)),
                 "candidate_count": len(shown), "omitted_evidence": [],
                 "empty_selection_reason": None if shown else "no_hits"}
     if "context_budget" in payload:
@@ -249,6 +249,7 @@ class Registry:
         self._chunks, self._regions = {}, {}
         self._structured_pairs = set()
         self.structured = False
+        self.full_context_mode = False
         try:
             value = _json(self.path.read_text(encoding="utf-8"))
         except FileNotFoundError:
@@ -569,7 +570,7 @@ def merge_scoped_context(initial, retry, original_question, selected_versions, r
     if not isinstance(registry, Registry) or any(pair not in registry.pairs for pair in pairs):
         _fail("source_versions_mismatch")
     req = _requirement(requirement if requirement is not None else identify_source_requirement(original_question), original_question)
-    if type(max_chunks) is not int or not 1 <= max_chunks <= 8:
+    if max_chunks is not None and (type(max_chunks) is not int or not 1 <= max_chunks <= 8):
         _fail("invalid_agent_evidence_count")
     options = token_context_options(registry=registry)
     if max_tokens is not None:
@@ -591,7 +592,7 @@ def merge_scoped_context(initial, retry, original_question, selected_versions, r
             ordinal = len(retained) + 1
             origins[identifier] = {**origin, "selection_ordinal": ordinal}
             retained.append({**deepcopy(item), "rank": ordinal})
-    capped = retained[:max_chunks]
+    capped = retained if max_chunks is None else retained[:max_chunks]
     context = {**select_context(capped, list(pairs), max_chars=max_chars, **options), "question": original_question,
                "score_kind": searches[0].get("score_kind", "cosine"),
                "ranking_method": "retry_then_initial"}
@@ -610,7 +611,8 @@ def merge_scoped_context(initial, retry, original_question, selected_versions, r
              "rounds": [{"round": label, "search": searches[i], "context": round_contexts[i]}
                         for i, label in enumerate(("initial", "retry"))],
              "merged_candidates": deepcopy(retained), "selection_origins": origins, "duplicates": duplicates,
-             "count_omitted": [{"chunk_id": row["chunk_id"], **origins[row["chunk_id"]], "reason": "count_limit"} for row in retained[max_chunks:]],
+             "count_omitted": [{"chunk_id": row["chunk_id"], **origins[row["chunk_id"]], "reason": "count_limit"} for row in
+                                ([] if max_chunks is None else retained[max_chunks:])],
              "character_omitted": deepcopy(context["omitted_evidence"]),
              "initial_returned_ids": initial_ids, "retry_returned_ids": retry_ids, "merged_ids": ids(retained),
              "count_capped_ids": ids(capped), "initial_shown_ids": initial_shown, "final_shown_ids": final_shown,
@@ -668,4 +670,43 @@ def validate_citation_scope(answer, context, qualification, verified_registry, *
                                      "chunk_id": identifier, "status": "valid" if code is None else "invalid_output", "code": code})
             if code is not None and result["error"] is None:
                 result.update(status="invalid_output", error={"code": code, "message": "引用未满足原问题来源范围"})
+    return result
+
+
+def validate_prose_citation_scope(citations, context, qualification, verified_registry, *, requirement=None):
+    """Check only the published prose citation occurrences against source range."""
+    result = {"status": "valid", "checks": [], "error": None}
+    try:
+        registry = verified_registry
+        if not isinstance(registry, Registry) or not isinstance(qualification, dict):
+            _fail("invalid_source_qualification")
+        req = _requirement(requirement if requirement is not None else qualification.get("requirement"), context.get("question"))
+        build_messages(context["question"], context)
+    except Exception as error:
+        result.update(status="tool_error", error={"code": getattr(error, "code", "invalid_source_qualification"),
+                                                 "message": "来源范围或证据快照核验失败"})
+        return result
+    shown = set(context["allowed_citation_ids"])
+    sources = {row["chunk_id"]: row for row in context["shown_evidence"]}
+    eligible = set()
+    if req["resolution"] == "explicit":
+        try:
+            for identifier in {row.get("chunk_id") for row in citations} & shown:
+                source = sources[identifier]
+                candidate = {**source, "text": source["shown_text"]}
+                if registry.qualify(candidate)["eligible"]:
+                    eligible.add(identifier)
+        except Exception as error:
+            result.update(status="tool_error", error={"code": getattr(error, "code", "invalid_source_qualification"),
+                                                     "message": "来源范围或证据快照核验失败"})
+            return result
+    for citation_index, row in enumerate(citations):
+        identifier = row.get("chunk_id")
+        code = ("citation_not_shown" if identifier not in shown else
+                "source_constraint_ambiguous" if req["resolution"] == "ambiguous" else
+                "citation_source_scope_mismatch" if req["resolution"] == "explicit" and identifier not in eligible else None)
+        result["checks"].append({"claim_index": 0, "citation_index": citation_index,
+                                 "chunk_id": identifier, "status": "valid" if code is None else "invalid_output", "code": code})
+        if code is not None and result["error"] is None:
+            result.update(status="invalid_output", error={"code": code, "message": "引用未满足原问题来源范围"})
     return result

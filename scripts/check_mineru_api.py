@@ -33,6 +33,7 @@ class MinerUAPIChecks(unittest.TestCase):
                 archive.writestr("paper/layout.json", '{"pdf_info": []}')
                 archive.writestr("paper/images/formula.png", b"offline-image")
             seen, polls = [], 0
+            submitted = []
 
             def handle(request):
                 nonlocal polls
@@ -44,10 +45,12 @@ class MinerUAPIChecks(unittest.TestCase):
                 if request.method == "POST":
                     self.assertEqual(request.url.path, "/api/v4/file-urls/batch")
                     body = json.loads(request.content)
+                    submitted.append(deepcopy(body))
                     self.assertEqual(body["model_version"], "vlm")
                     self.assertTrue(body["enable_formula"])
                     self.assertTrue(body["enable_table"])
-                    self.assertEqual(body["files"], [{"name": "paper.pdf", "is_ocr": True, "page_ranges": "3"}])
+                    self.assertEqual(body["files"][0]["name"], "paper.pdf")
+                    self.assertTrue(body["files"][0]["is_ocr"])
                     return httpx.Response(200, json={"code": 0, "data": {
                         "batch_id": "offline-batch", "file_urls": ["https://upload.invalid/paper"]}})
                 if request.method == "PUT":
@@ -61,16 +64,28 @@ class MinerUAPIChecks(unittest.TestCase):
                     "state": "done", "full_zip_url": "https://download.invalid/result.zip"}
                 return httpx.Response(200, json={"code": 0, "data": {"extract_result": [row]}})
 
-            with httpx.Client(transport=httpx.MockTransport(handle)) as client, \
-                    patch("paper_assistant.mineru_api.time.sleep"):
-                result = parse_pdf_via_api(source, root / "result", settings,
-                                          page_ranges="3", http_client=client)
+            def run(output, page_ranges):
+                nonlocal polls, seen
+                polls, seen = 0, []
+                with httpx.Client(transport=httpx.MockTransport(handle)) as client, \
+                        patch("paper_assistant.mineru_api.time.sleep"):
+                    return parse_pdf_via_api(source, output, settings,
+                                              page_ranges=page_ranges, http_client=client)
+
+            full = run(root / "result-full", None)
             self.assertEqual(len(seen), 5)
-            self.assertEqual(Path(result["markdown_files"][0]).read_text(encoding="utf-8"),
+            self.assertNotIn("page_ranges", submitted[-1]["files"][0])
+            self.assertEqual(Path(full["markdown_files"][0]).read_text(encoding="utf-8"),
                              "every = all = each ≤ most")
-            self.assertEqual(Path(result["json_files"][0]).name, "layout.json")
-            self.assertTrue((root / "result/paper/images/formula.png").is_file())
-            self.assertTrue((root / "result/result.zip").is_file())
+            self.assertEqual(Path(full["json_files"][0]).name, "layout.json")
+            self.assertTrue((root / "result-full/paper/images/formula.png").is_file())
+            self.assertTrue((root / "result-full/result.zip").is_file())
+            paged = run(root / "result-paged", "3")
+            self.assertEqual(len(seen), 5)
+            self.assertEqual(submitted[-1]["files"], [
+                {"name": "paper.pdf", "is_ocr": True, "page_ranges": "3"}])
+            self.assertEqual(Path(paged["markdown_files"][0]).read_text(encoding="utf-8"),
+                             "every = all = each ≤ most")
 
     def test_api_layout_adapter_keeps_normalized_bboxes_and_records_page_sizes(self):
         from paper_assistant.mineru_parser import add_page_dimensions, api_parser_profile, structure_units

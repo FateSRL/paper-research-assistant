@@ -8,3 +8,4 @@ fonttools==4.66.1
 qdrant-client==1.19.1
 streamlit==1.65.0
 tokenizers==0.23.3
+mini-racer==0.12.4

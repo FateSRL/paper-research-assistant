@@ -1,7 +1,7 @@
 """D9 E: owned two-mode runtime, explicit frozen policy and source bindings."""
 from contextlib import ExitStack
 from copy import deepcopy
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime, timezone
 import json
 from pathlib import Path
@@ -12,7 +12,7 @@ from paper_assistant import web_runtime
 from paper_assistant.agent import answer_question_agent
 from paper_assistant.agent_export import _identifier, render_agent_run, save_agent_run
 from paper_assistant.agent_records import diagnostic_snapshot
-from paper_assistant.config import load_embedding_settings, load_llm_settings
+from paper_assistant.config import load_embedding_settings, load_llm_settings, load_agent_max_iterations
 from paper_assistant.conversation import prepare_conversation
 from paper_assistant.deadline import DeadlineExceeded, commit_result, final_deadline, preserve_expired_failure, remaining
 from paper_assistant.llm_client import ChatBudget, ChatPolicy, LLMCallError, RecordedLLM
@@ -26,9 +26,11 @@ STRATEGY_PATH = "artifacts/d9/runtime_config.json"
 CONTRACT_PATH = "artifacts/d9/agent_config.json"
 REGISTRY_PATH = "artifacts/d9/source_regions.json"
 SCHEMA_VERSION = "d9-runtime-policy-v1"
-RUNTIME_VERSION = "d9-owned-two-mode-runtime-v1"
+RUNTIME_VERSION = "d9-native-tool-loop-runtime-v2"
 MODES = ("fixed_rag", "agent")
 INTERACTIVE_CHAT_POLICY = ChatPolicy(max_tokens=4096, max_attempts=None, total_timeout=None)
+INTERACTIVE_AGENT_POLICY = ChatPolicy(max_tokens=4096, request_timeout=300.0,
+    max_attempts=None, total_timeout=None, max_repairs=None, retry_per_invoke=True)
 STATUSES = ("answered", "insufficient_evidence", "tool_error", "invalid_output", "budget_exceeded", "needs_clarification")
 InvalidQuestion = legacy.InvalidQuestion
 load_current_profile = legacy.load_current_profile
@@ -61,14 +63,14 @@ def load_strategy(project_root=ROOT):
     strategy = _read(root / STRATEGY_PATH)
     if strategy.get("schema_revision") != SCHEMA_VERSION:
         raise ValueError("D9_runtime_configuration_mismatch")
-    if strategy["rules"]["budget"]["chat_policy"] != asdict(ChatPolicy()):
+    if ChatPolicy(**strategy["rules"]["budget"]["chat_policy"]) != ChatPolicy():
         raise ValueError("D9_runtime_budget_mismatch")
     return strategy
 
 
 def validate_configuration(strategy, embedding, chat, profile, policy):
     public = legacy.public_configuration(embedding, chat, profile, policy)
-    if strategy["rules"]["budget"]["chat_policy"] != asdict(policy):
+    if ChatPolicy(**strategy["rules"]["budget"]["chat_policy"]) != policy:
         raise ValueError("D9_public_configuration_mismatch")
     return public
 
@@ -86,6 +88,12 @@ def list_ready_versions(*, project_root=ROOT):
 
 def _failure(report, status, code, stage):
     result = report["result"]
+    if (result.get("loop_version") == "react-native-tools-v1" and result.get("status") == "answered"
+            and isinstance((result.get("answer") or {}).get("text"), str)):
+        result["recovery"] = {"kind": "validated_final", "trigger": code, "stage": stage, "model_requests": 0}
+        result["interrupted_failure"] = {"status": status, "code": code, "stage": stage}
+        result["stop_reason"] = "recovered_final_answer"
+        return
     if preserve_expired_failure(result, status, code, "D9 本轮步骤未完成，请检查安全记录", stage):
         return
     report["pre_failure_result"] = deepcopy(result)
@@ -95,7 +103,7 @@ def _failure(report, status, code, stage):
 
 def run_question(query, selected_versions, *, mode="fixed_rag", project_root=ROOT,
                  submission_id=None, top_k=5, max_chars=8000, conversation_id=None, conversation_history=None,
-                 library_mode=False, answer_instructions=None):
+                 library_mode=False, answer_instructions=None, max_iterations=None):
     if mode not in MODES:
         raise InvalidQuestion("模式必须为固定 RAG 或 Agent")
     pairs = legacy.validate_agent_input(query, selected_versions, top_k=top_k, max_chars=max_chars)
@@ -105,7 +113,8 @@ def run_question(query, selected_versions, *, mode="fixed_rag", project_root=ROO
     except ValueError:
         raise InvalidQuestion("提交标识不合法") from None
     root = Path(project_root).resolve()
-    policy = INTERACTIVE_CHAT_POLICY if library_mode else ChatPolicy()
+    react = library_mode and mode == "agent"
+    policy = INTERACTIVE_AGENT_POLICY if react else INTERACTIVE_CHAT_POLICY if library_mode else ChatPolicy()
     budget = ChatBudget(policy)
     now = datetime.now(timezone.utc)
     run_id = now.strftime("%Y%m%d_%H%M%S_%f") + "_" + uuid4().hex[:12]
@@ -113,7 +122,6 @@ def run_question(query, selected_versions, *, mode="fixed_rag", project_root=ROO
     report = {"task": "D9", "stage": "d9", "mode": mode, "run_id": run_id, "submission_id": token,
         "conversation_id": conversation_id, "conversation_history": deepcopy(conversation_history or []),
         "user_question": query, "standalone_question": None if conversation_history or library_mode else query,
-        "clarification_question": None,
         "started_at_utc": now.isoformat(), "finished_at_utc": None, "runtime_version": RUNTIME_VERSION,
         "policy": asdict(policy), "configuration": None, "index_profile": None, "strategy_binding": None,
         "registry_binding": None, "selected_version_metadata": [],
@@ -147,6 +155,15 @@ def run_question(query, selected_versions, *, mode="fixed_rag", project_root=ROO
         remaining(budget.remaining_seconds)
         stage = "configuration"
         embedding, chat = load_embedding_settings(), load_llm_settings()
+        if react:
+            iterations = load_agent_max_iterations() if max_iterations is None else max_iterations
+            if type(iterations) is not int or iterations <= 0:
+                raise ValueError("max_iterations must be a positive integer")
+            policy = replace(INTERACTIVE_AGENT_POLICY, request_timeout=chat.timeout)
+            budget.policy = policy
+            report.update(policy=asdict(policy), agent_max_iterations=iterations, synthesis_timeout=90.0,
+                deadline_enforcement="per_request_timeout_and_per_invoke_network_retry; native_tool_loop_limit",
+                budget_implementation_version="react-iteration-and-invoke-retry-v1")
         profile = load_current_profile(root)
         report["configuration"] = (legacy.public_configuration(embedding, chat, profile, policy) if library_mode else
                                    validate_configuration(strategy, embedding, chat, profile, policy))
@@ -175,22 +192,17 @@ def run_question(query, selected_versions, *, mode="fixed_rag", project_root=ROO
             if answer_instructions:
                 conversation["answer_instructions"] = answer_instructions
             report["standalone_question"] = conversation["standalone_question"]
-            report["clarification_question"] = conversation["clarification_question"]
             if library_mode:
                 report["planned_queries"] = deepcopy(conversation["planned_queries"])
-            if conversation["clarification_question"]:
-                report["result"].update(status="needs_clarification", failure_stage=None,
-                    stop_reason="clarification_required", clarification_question=conversation["clarification_question"])
-            else:
-                stage, pipeline_started = "pipeline", True
-                report["result"]["statistics"]["embedding"] = None
-                core = answer_question_agent if mode == "agent" else answer_question
-                conversation_kwargs = {"conversation_context": conversation} if library_mode or report["conversation_history"] or answer_instructions else {}
-                if library_mode and mode == "agent":
-                    conversation_kwargs["autonomous_steps"] = 5
-                report["result"] = deepcopy(core(conversation["standalone_question"], pairs, searcher, store, client,
-                    project_root=root, top_k=top_k, max_chars=max_chars, source_registry=registry,
-                    enforce_remaining_budget=True, **conversation_kwargs))
+            stage, pipeline_started = "pipeline", True
+            report["result"]["statistics"]["embedding"] = None
+            core = answer_question_agent if mode == "agent" else answer_question
+            conversation_kwargs = {"conversation_context": conversation} if library_mode or report["conversation_history"] or answer_instructions else {}
+            if library_mode and mode == "agent":
+                conversation_kwargs["autonomous_steps"] = iterations
+            report["result"] = deepcopy(core(conversation["standalone_question"], pairs, searcher, store, client,
+                project_root=root, top_k=top_k, max_chars=max_chars, source_registry=registry,
+                enforce_remaining_budget=True, **conversation_kwargs))
             if mode == "fixed_rag" and not report["result"].get("stop_reason"):
                 status = report["result"].get("status")
                 if status in ("answered", "insufficient_evidence"):

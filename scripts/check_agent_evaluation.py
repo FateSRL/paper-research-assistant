@@ -278,16 +278,55 @@ class AgentEvaluationChecks(unittest.TestCase):
         self.assertEqual(summary["stage_metrics"]["initial_returned"]["all_targets_hit"]["denominator"], 1)
 
     def test_published_duplicate_citations_and_prior_intercepts_are_counted_separately(self):
-        saved = report()
-        saved["answer"]["claims"][0]["citation_ids"] = ["a", "a"]
-        saved["result"]["citation_checks"] = [{"checks": [{"claim_index": 0, "citation_index": 0, "chunk_id": "bad", "status": "invalid_output"}]},
+        # Legacy claim records keep their original occurrence metric.
+        legacy = report()
+        legacy["answer"]["claims"][0]["citation_ids"] = ["a", "a"]
+        legacy["result"]["citation_checks"] = [{"checks": [{"claim_index": 0, "citation_index": 0, "chunk_id": "bad", "status": "invalid_output"}]},
                                                {"checks": [{"claim_index": 0, "citation_index": 0, "chunk_id": "a", "status": "valid"},
                                                            {"claim_index": 0, "citation_index": 1, "chunk_id": "a", "status": "valid"}]}]
+        legacy["result"]["action_steps"] = [{"parse_error_code": "invalid_json"}, {"parse_error_code": None}]
+        legacy_score = score_agent_case(case(), legacy)
+        self.assertEqual(legacy_score["citation_location"], {"numerator": 2, "denominator": 2, "ratio": 1.0})
+        self.assertEqual(legacy_score["output_claim_count"], 1)
+        self.assertIsNone(legacy_score["published_citation_occurrences"])
+
+        # New prose answers count every published occurrence, including repeats;
+        # unique sources are separate and claims are not invented.
+        saved = report()
+        from paper_assistant.prose import normalize_citation_markers, parse_markers
+        text = normalize_citation_markers(
+            "Alpha result [ID:1]. Beta result [ID: 2]. Alpha again [ID:1]. Bibliography [1] [99].")
+        saved["answer"] = {
+            "text": text,
+            "citations": [{**marker, "chunk_id": {1: "a", 2: "b"}[marker["ref"]]}
+                          for marker in parse_markers(text)],
+            "evidence_sources": [candidate("a"), candidate("b", text="Target beta.", page=2)],
+        }
+        saved["result"]["answer"] = deepcopy(saved["answer"])
+        saved["result"]["citation_checks"] = [
+            {"checks": [{"claim_index": 0, "citation_index": 0, "chunk_id": "bad", "status": "invalid_output"}]},
+            {"checks": [{"claim_index": 0, "citation_index": 0, "chunk_id": "a", "status": "valid"},
+                         {"claim_index": 0, "citation_index": 1, "chunk_id": "b", "status": "valid"},
+                         {"claim_index": 0, "citation_index": 2, "chunk_id": "a", "status": "valid"}]}]
         saved["result"]["action_steps"] = [{"parse_error_code": "invalid_json"}, {"parse_error_code": None}]
         score = score_agent_case(case(), saved)
-        self.assertEqual(score["citation_location"], {"numerator": 2, "denominator": 2, "ratio": 1.0})
+        self.assertEqual(score["citation_location"], {"numerator": 3, "denominator": 3, "ratio": 1.0})
+        self.assertEqual(score["published_citation_occurrences"], 3)
+        self.assertEqual(score["published_unique_sources"], 2)
+        self.assertIsNone(score["output_claim_count"])
+        self.assertTrue(score["program_answered_completion"])
         self.assertEqual(score["raw_citation_intercepts"], 1)
         self.assertEqual(score["raw_parse_intercepts"], 1)
+
+        saved["answer"] = {"text": "The available evidence cannot determine that value. Bibliography [1] [99].",
+                           "citations": [], "evidence_sources": []}
+        saved["result"]["answer"] = deepcopy(saved["answer"])
+        saved["result"]["citation_checks"] = [{"status": "valid", "checks": []}]
+        empty = score_agent_case(case(), saved)
+        self.assertEqual(empty["published_citation_occurrences"], 0)
+        self.assertEqual(empty["published_unique_sources"], 0)
+        self.assertEqual(empty["citation_location"], {"numerator": 0, "denominator": 0, "ratio": None})
+        self.assertIsNone(empty["output_claim_count"])
 
     def test_program_answer_and_negative_refusal_never_become_semantic_scores(self):
         positive = score_agent_case(case(), report())

@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 import json
 from pathlib import Path
 from queue import Empty, Queue
+import re
 import uuid
 
 import streamlit as st
@@ -266,9 +267,15 @@ def _render_trajectory(report):
         st.text("停止原因：" + (_text(report.get("stop_reason"))
                               or _text(result.get("stop_reason")) or "未记录"))
         if autonomous:
-            st.text("自主步数：" + _number(result.get("autonomous_steps_used"))
+            st.text(("自主轮数：" if result.get("loop_version") else "自主步数：") + _number(result.get("autonomous_steps_used"))
                     + " / " + _number(result.get("autonomous_step_limit")))
             st.text("触顶收尾：" + ("是" if result.get("limit_finalize") is True else "否"))
+        if result.get("loop_version"):
+            st.text("实际取证调用：" + _number(result.get("evidence_calls_used")))
+            if result.get("recovery"):
+                st.text("正文恢复：" + _text(result["recovery"].get("kind")))
+            if result.get("synthesis"):
+                st.text("无工具综合：" + _text(result["synthesis"].get("status")))
         plan = result.get("planned_queries", report.get("planned_queries"))
         if isinstance(plan, list) and plan:
             st.caption("建议查询（模型可调整或跳过）" if autonomous else "本轮检索计划")
@@ -290,7 +297,8 @@ def _render_trajectory(report):
                 if step.get("repair_kind"):
                     label += "（修复）"
                 action = _mapping(step.get("parsed_action"))
-                st.text(label + "模型动作：" + (_text(action.get("action")) or "未完成"))
+                names = [_text(_mapping(call.get("function")).get("name")) for call in step.get("tool_calls") or []]
+                st.text(label + "模型动作：" + (", ".join(names) if names else _text(action.get("action")) or "未完成"))
                 st.text(label + "剩余步数：" + _number(step.get("remaining_steps")))
                 if action.get("missing_information"):
                     st.text(label + "取证目标：" + _text(action.get("missing_information")))
@@ -402,40 +410,71 @@ def render_report(report, *, key_prefix):
         sources = answer.get("evidence_sources") or []
         lookup = {_text(source.get("chunk_id")): source for source in sources
                   if isinstance(source, dict)}
-        citation_numbers = {}
-        for number, claim in enumerate(answer.get("claims") or [], start=1):
-            if not isinstance(claim, dict):
-                continue
-            basis = claim.get("basis", "paper_evidence")
-            ids = claim.get("citation_ids") or []
-            with st.container(key=f"paragraph_{key_prefix}_{number}"):
-                st.markdown(_text(claim.get("claim")))
-                if basis != "paper_evidence":
-                    st.caption(BASIS_LABELS.get(basis, "未标注依据"))
-                if not ids:
-                    continue
-                for citation_id in ids:
-                    if citation_id not in citation_numbers:
-                        citation_numbers[citation_id] = len(citation_numbers) + 1
-                citation_label = " ".join(f"[{citation_numbers[citation_id]}]" for citation_id in ids)
-                with st.popover(citation_label, type="tertiary", width="content",
-                                key=f"citation_{key_prefix}_{number}", on_change="ignore"):
-                    st.markdown("**本段引用**")
-                    for quote in claim.get("evidence_quotes") or []:
-                        st.caption("本段原文短引句 · " + _text(quote.get("chunk_id")))
-                        st.code(_text(quote.get("quote")), language=None)
-                    for source_number, citation_id in enumerate(ids, start=1):
-                        source = lookup.get(citation_id)
+        if isinstance(answer.get("text"), str):
+            text = re.sub(r"\[ID:(\d+)\]", r"[\1]", answer["text"])
+            st.markdown(text)
+            citations = answer.get("citations") or []
+            if citations:
+                unique = []
+                seen = set()
+                for citation in citations:
+                    if not isinstance(citation, dict):
+                        continue
+                    identifier = _text(citation.get("chunk_id"))
+                    if identifier and identifier not in seen:
+                        seen.add(identifier)
+                        unique.append(citation)
+                with st.popover("引用来源（" + str(len(citations)) + " 处 / "
+                                + str(len(unique)) + " 个来源）", type="tertiary",
+                                width="content", key=f"prose_citations_{key_prefix}",
+                                on_change="ignore"):
+                    st.markdown("**正文引用**")
+                    for number, citation in enumerate(unique, start=1):
+                        source = lookup.get(_text(citation.get("chunk_id")))
                         if source is None:
-                            st.info("本次报告未保存引用原文：" + _text(citation_id))
+                            st.info("本次报告未保存引用原文：" + _text(citation.get("chunk_id")))
                             continue
-                        if source_number > 1:
+                        if number > 1:
                             st.divider()
-                        with st.container(key=f"source_{key_prefix}_{number}_{source_number}"):
-                            _show_source(source, citation_numbers[citation_id])
-        reason = _text(answer.get("reason"))
-        if reason:
-            st.caption(reason)
+                        _show_source(source, citation.get("ref"))
+            reason = _text(answer.get("reason"))
+            if reason:
+                st.caption(reason)
+        else:
+            citation_numbers = {}
+            for number, claim in enumerate(answer.get("claims") or [], start=1):
+                if not isinstance(claim, dict):
+                    continue
+                basis = claim.get("basis", "paper_evidence")
+                ids = claim.get("citation_ids") or []
+                with st.container(key=f"paragraph_{key_prefix}_{number}"):
+                    st.markdown(_text(claim.get("claim")))
+                    if basis != "paper_evidence":
+                        st.caption(BASIS_LABELS.get(basis, "未标注依据"))
+                    if not ids:
+                        continue
+                    for citation_id in ids:
+                        if citation_id not in citation_numbers:
+                            citation_numbers[citation_id] = len(citation_numbers) + 1
+                    citation_label = " ".join(f"[{citation_numbers[citation_id]}]" for citation_id in ids)
+                    with st.popover(citation_label, type="tertiary", width="content",
+                                    key=f"citation_{key_prefix}_{number}", on_change="ignore"):
+                        st.markdown("**本段引用**")
+                        for quote in claim.get("evidence_quotes") or []:
+                            st.caption("本段原文短引句 · " + _text(quote.get("chunk_id")))
+                            st.code(_text(quote.get("quote")), language=None)
+                        for source_number, citation_id in enumerate(ids, start=1):
+                            source = lookup.get(citation_id)
+                            if source is None:
+                                st.info("本次报告未保存引用原文：" + _text(citation_id))
+                                continue
+                            if source_number > 1:
+                                st.divider()
+                            with st.container(key=f"source_{key_prefix}_{number}_{source_number}"):
+                                _show_source(source, citation_numbers[citation_id])
+            reason = _text(answer.get("reason"))
+            if reason:
+                st.caption(reason)
     elif status == "needs_clarification":
         st.info(_text(report.get("clarification_question")) or "请明确本轮追问的对象。")
     else:
@@ -458,7 +497,7 @@ def render_report(report, *, key_prefix):
                 st.info("本轮没有可展示的证据。")
             for number, source in enumerate(sources, start=1):
                 with st.container(key=f"source_{key_prefix}_shown_{number}"):
-                    _show_source(source, number, shown=True)
+                    _show_source(source, source.get("ref", number), shown=True)
     with st.expander("回答详情与下载"):
         if status not in ("answered", "needs_clarification", "insufficient_evidence"):
             st.caption("运行状态：" + label)

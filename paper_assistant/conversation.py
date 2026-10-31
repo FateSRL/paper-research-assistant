@@ -31,12 +31,22 @@ def select_conversation_history(records, conversation_id, *, max_turns=3, max_ch
             row["clarification_question"] = report.get("clarification_question", "")
         else:
             answer = report.get("answer") or {}
-            row["claims"] = [
-                {"claim": claim.get("claim", ""),
-                 "basis": claim.get("basis", "paper_evidence"),
-                 "citation_ids": list(claim.get("citation_ids") or [])}
-                for claim in answer.get("claims") or []
-            ]
+            if isinstance(answer.get("text"), str):
+                row["text"] = answer["text"]
+                row["citations"] = [
+                    {"ref": citation.get("ref"), "chunk_id": citation.get("chunk_id")}
+                    for citation in answer.get("citations") or []
+                    if isinstance(citation, dict) and isinstance(citation.get("chunk_id"), str)
+                ]
+                row["citation_ids"] = list(dict.fromkeys(
+                    citation["chunk_id"] for citation in row["citations"]))
+            else:
+                row["claims"] = [
+                    {"claim": claim.get("claim", ""),
+                     "basis": claim.get("basis", "paper_evidence"),
+                     "citation_ids": list(claim.get("citation_ids") or [])}
+                    for claim in answer.get("claims") or []
+                ]
             if answer.get("reason"):
                 row["reason"] = answer["reason"]
         history.append(row)
@@ -75,9 +85,9 @@ def normalize_planned_queries(value, question, versions):
 
 def prepare_conversation(query, history, client, *, conversation_id=None, selected_versions=None,
                          paper_information=None, plan_queries=True, record=None):
-    """一次理解、澄清和检索规划，复用本轮聊天预算；旧 CLI 可保留仅追问理解。"""
+    """一次理解与检索规划；不产生前置澄清，也不改写首问。"""
     context = {"conversation_id": conversation_id, "user_question": query,
-               "standalone_question": query, "clarification_question": None,
+               "standalone_question": query,
                "history": history, "referenced_evidence_ids": []}
     if not history and not plan_queries:
         return context
@@ -99,22 +109,22 @@ def prepare_conversation(query, history, client, *, conversation_id=None, select
             "跨论文比较沿同一维度分别查询相关论文，每条 selected_versions 仅选当前完整版本配对。"
             "全部查询共享当前作答问题的来源限制，不能因未重复摘要等限制而扩大范围。"
             "JSON 另加 planned_queries：[{\"query\":具体查询字符串,\"selected_versions\":"
-            "[{\"paper_id\":字符串,\"parse_revision\":字符串}]}]；需澄清时列表为空。")
+            "[{\"paper_id\":字符串,\"parse_revision\":字符串}]}]；无法形成具体查询时由程序保留原问。")
     if not history:
         understanding = (
-            "这是会话首问。用户原文就是作答目标，由程序保存，不生成 standalone_question，"
-            "不润色、扩写或增加提问。结合所选论文判断当前问题是否缺少必要对象；"
-            "对象明确时 clarification_question 为 null，否则只提出必要的简短澄清。"
-            "只返回JSON：{\"clarification_question\":字符串或null,\"referenced_evidence_ids\":[]}。")
+            "这是会话首问。用户原文就是作答目标，由程序原样保存；不要生成或改写问题，"
+            "不要向用户提出澄清。只需判断检索表达并规划查询。"
+            "只返回JSON：{\"referenced_evidence_ids\":[]}，如规划检索再加 planned_queries。")
     else:
         understanding = (
             "这是多轮追问。历史只帮助确定指代和表达要求，历史模型结论不是已核实论文事实。"
             "只补全当前所问涉及的论文、方法、实验对象、结论编号和必要指代，保留原来源限制及"
             "‘解释第二条’、‘说简单一点’等意图，不增加新指标、比较维度或新的为什么。"
-            "有多个合理对象或必要信息缺失时简短澄清，不猜测；回复澄清时结合原问题与上一轮澄清。"
-            "只返回JSON：{\"standalone_question\":字符串或null,\"clarification_question\":字符串或null,"
-            "\"referenced_evidence_ids\":[]}，两个问题恰有一个非空。只有明确追问先前结论对应的原文、"
-            "证据或引用时，才将该结论的citation_ids放入referenced_evidence_ids，其他追问为空。")
+            "能可靠确定指代时返回 standalone_question；无法可靠确定时返回 null，"
+            "程序会保留当前原问和实际历史进入正常流程，不要猜测对象，也不要向用户提出澄清。"
+            "只返回JSON：{\"standalone_question\":字符串或null,\"referenced_evidence_ids\":[]}。"
+            "只有明确追问先前结论对应的原文、证据或引用时，才将该结论的citation_ids放入"
+            "referenced_evidence_ids，其他追问为空。")
     messages = [
         {"role": "system", "content": (
             "你负责理解当前问题并规划检索，不回答论文问题。检索用语与作答目标是不同职责，"
@@ -132,25 +142,25 @@ def prepare_conversation(query, history, client, *, conversation_id=None, select
         raise LLMCallError("invalid_output", response.get("output_issue") or "invalid_followup_output",
                            "追问理解未产生完整结果，请重新说明问题")
     value = json.loads(response["content"])
-    question = value.get("standalone_question") if isinstance(value, dict) else None
-    clarification = value.get("clarification_question") if isinstance(value, dict) else None
-    clarification = clarification.strip() if isinstance(clarification, str) else None
-    question = ((question.strip() if isinstance(question, str) else None) if history
-                else None if clarification else query)
-    ids = value.get("referenced_evidence_ids", []) if isinstance(value, dict) else []
-    if not isinstance(value, dict) or bool(question) == bool(clarification) or not isinstance(ids, list):
-        raise LLMCallError("invalid_output", "invalid_followup_output", "追问理解未产生明确问题或澄清问题")
+    if not isinstance(value, dict):
+        raise LLMCallError("invalid_output", "invalid_followup_output", "追问理解未产生有效结果")
+    candidate = value.get("standalone_question") if history else None
+    question = candidate.strip() if isinstance(candidate, str) and candidate.strip() else query
+    ids = value.get("referenced_evidence_ids", [])
+    if not isinstance(ids, list):
+        raise LLMCallError("invalid_output", "invalid_followup_output", "追问理解未产生有效引用")
     available = {identifier for row in history for claim in row.get("claims", [])
                  for identifier in claim.get("citation_ids", [])}
-    context.update(standalone_question=question, clarification_question=clarification,
+    available |= {identifier for row in history for identifier in row.get("citation_ids", [])}
+    context.update(standalone_question=question,
                    referenced_evidence_ids=list(dict.fromkeys(identifier for identifier in ids
-                       if isinstance(identifier, str) and identifier in available)) if question else [])
+                       if isinstance(identifier, str) and identifier in available)))
     if plan_queries:
         # 完整问题漏掉明确摘要限制时补回，随后只从完整问题确定共享来源要求。
-        if (question and payload["source_requirement"]["required_scope"] == "abstract"
+        if (payload["source_requirement"]["required_scope"] == "abstract"
                 and identify_source_requirement(question)["required_scope"] != "abstract"):
             question += "\n仅根据摘要中内容。"
             context["standalone_question"] = question
-        context["source_requirement"] = identify_source_requirement(question) if question else None
-        context["planned_queries"] = normalize_planned_queries(value.get("planned_queries"), question, versions) if question else []
+        context["source_requirement"] = identify_source_requirement(question)
+        context["planned_queries"] = normalize_planned_queries(value.get("planned_queries"), question, versions)
     return context

@@ -105,7 +105,8 @@ def public_configuration(embedding, chat, profile, policy) -> dict:
             or endpoint.password or endpoint.query or endpoint.fragment):
         raise ValueError("chat public endpoint is invalid")
     return {"chat": {"provider": chat.provider, "model_id": chat.model_id,
-                     "base_url": chat.base_url, "configured_timeout": chat.timeout},
+                     "base_url": chat.base_url, "configured_timeout": chat.timeout,
+                     "context_length": chat.context_length},
             "embedding": deepcopy(profile["recipe"]), "policy": asdict(policy)}
 
 

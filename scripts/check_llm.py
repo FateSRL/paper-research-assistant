@@ -266,6 +266,44 @@ class LLMChecks(unittest.TestCase):
                 self.assertEqual(result["attempts"][0]["http_status"], status)
                 self.assertTrue(result["attempts"][1]["is_network_retry"])
 
+        from dataclasses import replace
+        from paper_assistant.d9_runtime import INTERACTIVE_AGENT_POLICY
+        self.settings = replace(self.settings, timeout=300.0)
+        budget = ChatBudget(INTERACTIVE_AGENT_POLICY, clock=self.clock)
+        client, requests = self.client(http_error(503), (200, completion()),
+                                       http_error(429), (200, completion()), budget=budget)
+        first = client.invoke(self.messages)
+        second = client.invoke(self.messages, purpose="synthesis", request_timeout=90.0)
+        self.assertEqual(len(requests), 4)
+        self.assertEqual(budget.network_retries, 2)
+        self.assertEqual([r["is_network_retry"] for r in budget.records], [False, True, False, True])
+        self.assertEqual([r["purpose"] for r in budget.records], ["answer", "answer", "synthesis", "synthesis"])
+        self.assertEqual([r["timeout_seconds"] for r in budget.records], [300, 300, 90, 90])
+        for request, timeout in zip(requests, (300,300,90,90)):
+            self.assertTrue(all(value == timeout for value in request.extensions["timeout"].values()))
+        self.assertEqual(first["attempts"][0]["http_status"], 503)
+        self.assertEqual(second["attempts"][0]["http_status"], 429)
+        self.assertEqual(budget.statistics()["known_total_tokens"], 50)
+        self.assertIsNone(budget.statistics()["total_tokens"])
+
+        budget = ChatBudget(INTERACTIVE_AGENT_POLICY, clock=self.clock)
+        client, requests = self.client(http_error(500), http_error(503),
+            http_error(500), (200, completion()), budget=budget)
+        with self.assertRaises(LLMCallError) as caught:
+            client.invoke(self.messages)
+        self.assertEqual(len(requests), 2)  # no third hidden send in this invoke
+        self.assertEqual(len(caught.exception.attempts), 2)
+        result = client.invoke(self.messages, purpose="repair")
+        self.assertEqual(len(requests), 4)
+        self.assertEqual(result["statistics"]["network_retries"], 2)
+        self.assertEqual(result["statistics"]["repairs"], 1)
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(ChatPolicy(max_attempts=8, max_repairs=7).max_attempts, 8)
+        client, requests = self.client(http_error(401), policy=INTERACTIVE_AGENT_POLICY)
+        with self.assertRaises(LLMCallError):
+            client.invoke(self.messages)
+        self.assertEqual(len(requests), 1)
+
     def test_second_retryable_failure_stops_without_sdk_hidden_retry(self):
         client, requests = self.client(http_error(500), http_error(503))
         with self.assertRaises(LLMCallError) as caught:

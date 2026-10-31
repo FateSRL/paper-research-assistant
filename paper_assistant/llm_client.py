@@ -56,7 +56,8 @@ class ChatPolicy:
     request_timeout: float = 30.0
     max_attempts: int | None = 3
     max_network_retries: int = 1
-    max_repairs: int = 1
+    max_repairs: int | None = 1
+    retry_per_invoke: bool = False
     total_timeout: float | None = 120.0
 
     def __post_init__(self):
@@ -67,11 +68,12 @@ class ChatPolicy:
         if self.max_attempts is not None:
             if type(self.max_attempts) is not int or self.max_attempts <= 0:
                 raise ValueError("max_attempts 必须为正整数或 None")
-            if self.max_attempts > 3:
-                raise ValueError("max_attempts 不能超过 D5 的三次硬上限")
-        for name in ("max_network_retries", "max_repairs"):
-            if type(getattr(self, name)) is not int or not 0 <= getattr(self, name) <= 1:
-                raise ValueError(f"{name} 必须为 0 或 1")
+        if type(self.max_network_retries) is not int or not 0 <= self.max_network_retries <= 1:
+            raise ValueError("max_network_retries 必须为 0 或 1")
+        if self.max_repairs is not None and (type(self.max_repairs) is not int or self.max_repairs < 0):
+            raise ValueError("max_repairs 必须为非负整数或 None")
+        if type(self.retry_per_invoke) is not bool:
+            raise ValueError("retry_per_invoke 必须为 bool")
         _positive(self.request_timeout, "request_timeout")
         if self.total_timeout is not None:
             _positive(self.total_timeout, "total_timeout")
@@ -98,9 +100,9 @@ class ChatBudget:
             raise LLMCallError("budget_exceeded", "deadline_exceeded", "问答截止预算已到，停止后续请求")
         if self.policy.max_attempts is not None and self.attempts >= self.policy.max_attempts:
             raise LLMCallError("budget_exceeded", "request_limit", "聊天请求次数已达上限")
-        if retry and self.network_retries >= self.policy.max_network_retries:
+        if retry and not self.policy.retry_per_invoke and self.network_retries >= self.policy.max_network_retries:
             raise LLMCallError("tool_error", "network_retry_limit", "可重试故障额度已耗尽")
-        if repair_start and self.repairs >= self.policy.max_repairs:
+        if repair_start and self.policy.max_repairs is not None and self.repairs >= self.policy.max_repairs:
             raise LLMCallError("budget_exceeded", "repair_limit", "格式或引用修复次数已达上限")
         self.attempts += 1
         self.network_retries += int(retry)
@@ -201,7 +203,7 @@ class RecordedLLM:
         content = content.replace(self.settings.api_key, "[REDACTED]")
         return re.sub(r"(?i)(\bbearer\s+)[A-Za-z0-9._~+/=-]+", r"\1[REDACTED]", content)
 
-    def invoke(self, messages, *, purpose="answer", require_json=False, tools=None, tool_choice=None) -> dict:
+    def invoke(self, messages, *, purpose="answer", require_json=False, tools=None, tool_choice=None, request_timeout=None) -> dict:
         start_index = len(self.budget.records)
         if self._closed:
             raise self._error("tool_error", "client_closed", "聊天客户端已关闭", start_index)
@@ -220,13 +222,17 @@ class RecordedLLM:
             return (set(item) == {"role", "content"} and role in ("system", "user", "assistant")
                     and isinstance(content, str) and bool(content.strip()))
 
-        if (purpose not in ("answer", "repair") or type(require_json) is not bool
+        if (purpose not in ("answer", "repair", "synthesis") or type(require_json) is not bool
                 or not isinstance(messages, list) or not messages
                 or any(not valid_message(item) for item in messages)):
             raise self._error("tool_error", "invalid_input", "聊天消息或调用参数不合法", start_index)
+        if request_timeout is not None:
+            _positive(request_timeout, "request_timeout")
         call_started, retry, first = self.clock(), False, True
+        call_retries = 0
         while True:
-            timeout = min(self.policy.request_timeout, self.settings.timeout, self.budget.remaining_seconds())
+            timeout = min(self.policy.request_timeout if request_timeout is None else request_timeout,
+                          self.settings.timeout, self.budget.remaining_seconds())
             if timeout <= 0:
                 raise self._error("budget_exceeded", "deadline_exceeded", "问答截止预算已到", start_index)
             try:
@@ -270,7 +276,8 @@ class RecordedLLM:
                 record.update(status="tool_error", error_code=failure)
                 if self.budget.remaining_seconds() <= 0:
                     raise self._error("budget_exceeded", "deadline_exceeded", "聊天请求结束时已超出截止预算", start_index)
-                if retryable and self.budget.network_retries < self.policy.max_network_retries:
+                if retryable and (call_retries if self.policy.retry_per_invoke else self.budget.network_retries) < self.policy.max_network_retries:
+                    call_retries += 1
                     retry, first = True, False
                     continue
                 raise self._error("tool_error", failure, "聊天服务请求失败，详情见安全错误代码与状态码", start_index) from None

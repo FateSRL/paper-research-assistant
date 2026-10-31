@@ -119,7 +119,7 @@ def load_fixed_material(baseline_path, store, *, project_root=ROOT):
 
     normal_context = {
         "conversation_id": None, "user_question": question, "standalone_question": question,
-        "clarification_question": None, "history": [], "referenced_evidence_ids": [],
+        "history": [], "referenced_evidence_ids": [],
         "answer_instructions": NORMAL_ANSWER_INSTRUCTION,
     }
     source_requirement = (request.get("conversation_context") or {}).get("source_requirement")

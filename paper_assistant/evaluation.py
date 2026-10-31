@@ -66,16 +66,32 @@ def score_case(case: dict, report: dict | None) -> dict:
                         "exact_target_hit_shown": bool(shown_ids),
                         "returned_chunk_ids": returned_ids, "shown_chunk_ids": shown_ids})
     status = report.get("status", "runner_failure")
-    claims = (report.get("answer") or {}).get("claims") or []
+    answer = report.get("answer") or {}
+    claims = answer.get("claims") or []
+    prose = isinstance(answer.get("text"), str)
+    citations = answer.get("citations") or [] if prose else []
     validations = result.get("citation_checks") or []
     final_checks = validations[-1].get("checks", []) if validations else []
     legal = {(c.get("claim_index"), c.get("citation_index"), c.get("chunk_id"))
              for c in final_checks if c.get("status") == "valid"}
     citation_total = citation_valid = 0
-    for claim_index, claim in enumerate(claims):
-        for citation_index, chunk_id in enumerate(claim.get("citation_ids") or []):
+    if prose:
+        for citation_index, citation in enumerate(citations):
+            if not isinstance(citation, dict):
+                continue
             citation_total += 1
-            citation_valid += (claim_index, citation_index, chunk_id) in legal
+            citation_valid += (0, citation_index, citation.get("chunk_id")) in legal
+        output_claim_count = None
+        unique_sources = len({row.get("chunk_id") for row in citations if isinstance(row, dict)})
+        answer_text_chars = len(answer["text"])
+    else:
+        for claim_index, claim in enumerate(claims):
+            for citation_index, chunk_id in enumerate(claim.get("citation_ids") or []):
+                citation_total += 1
+                citation_valid += (claim_index, citation_index, chunk_id) in legal
+        output_claim_count = len(claims)
+        unique_sources = len({chunk_id for claim in claims for chunk_id in claim.get("citation_ids") or []})
+        answer_text_chars = None
     citation_intercepts = sum(c.get("status") != "valid"
                               for validation in validations for c in validation.get("checks", []))
     generation = result.get("generation") or {}
@@ -98,7 +114,10 @@ def score_case(case: dict, report: dict | None) -> dict:
             "program_answered_completion": answerable and status == "answered",
             "answerable_refusal": answerable and status == "insufficient_evidence",
             "program_negative_refusal": not answerable and status == "insufficient_evidence",
-            "output_claim_count": len(claims), "citation_location": _ratio(citation_valid, citation_total),
+            "output_claim_count": output_claim_count, "citation_location": _ratio(citation_valid, citation_total),
+            "published_citation_occurrences": citation_total if prose else None,
+            "published_unique_sources": unique_sources if prose else None,
+            "answer_text_chars": answer_text_chars,
             "raw_citation_intercepts": citation_intercepts, "raw_parse_intercepts": parse_intercepts,
             "semantic_support_status": "not_reviewed", "human_review_status": "pending",
             "qa_accuracy": None, "correct_refusal_semantic": None,
@@ -112,6 +131,10 @@ def score_case(case: dict, report: dict | None) -> dict:
                        "chat": _number(chat.get("total_tokens")),
                        "known_chat": _number(chat.get("known_total_tokens"))},
             "elapsed_seconds": elapsed, "failure_stage": report.get("failure_stage")}
+
+
+def _sum_optional(values):
+    return sum(values) if values and all(type(value) is int for value in values) else None
 
 
 def summarize_case_scores(scores: list[dict], planned_cases: list[dict] | None = None) -> dict:
@@ -139,7 +162,10 @@ def summarize_case_scores(scores: list[dict], planned_cases: list[dict] | None =
             "citation_location": _ratio(sum(s["citation_location"]["numerator"] for s in scores), sum(s["citation_location"]["denominator"] for s in scores)),
             "raw_citation_intercepts": sum(s["raw_citation_intercepts"] for s in scores),
             "raw_parse_intercepts": sum(s["raw_parse_intercepts"] for s in scores),
-            "output_claim_count": sum(s["output_claim_count"] for s in scores),
+            "output_claim_count": _sum_optional([s.get("output_claim_count") for s in scores]),
+            "published_citation_occurrences": _sum_optional([s.get("published_citation_occurrences") for s in scores]),
+            "published_unique_sources": _sum_optional([s.get("published_unique_sources") for s in scores]),
+            "answer_text_chars": _sum_optional([s.get("answer_text_chars") for s in scores]),
             "semantic_support_status": "not_reviewed", "human_review_status": "pending", "qa_accuracy": None,
             "requests": {key: aggregate([s["requests"][key] for s in scores]) for key in ("embedding", "chat_sdk", "chat_http", "network")},
             "retries_and_repairs": {key: aggregate([s["retries_and_repairs"][key] for s in scores]) for key in ("network_retries", "repairs")},

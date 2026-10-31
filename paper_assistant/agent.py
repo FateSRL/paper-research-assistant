@@ -13,22 +13,27 @@ from paper_assistant.agent_actions import (
     ACTION_SCHEMA_VERSION, AUTONOMOUS_ACTION_SCHEMA_VERSION, ActionParseError, AnswerAction, PrepareAnswerAction, InsufficientEvidenceAction, RetrySearchAction, SearchAction,
     action_to_answer_draft, parse_agent_action, query_comparison_key,
     search_tool_definition, parse_search_tool_call, read_context_tool_definition, parse_read_context_call,
+    run_javascript_tool_definition, parse_run_javascript_call,
 )
 from paper_assistant.agent_context import (
     AGENT_SELECTION_VERSION, merge_agent_context, merge_planned_context, validate_search_round,
 )
 from paper_assistant.agent_prompt import (
-    AGENT_PROMPT_VERSION, AUTONOMOUS_PROMPT_VERSION, SCOPED_AGENT_PROMPT_VERSION,
-    build_action_repair_messages, build_agent_messages, build_prepared_final_messages,
+    AGENT_PROMPT_VERSION, AUTONOMOUS_PROMPT_VERSION, PROSE_FINAL_PROMPT_VERSION, SCOPED_AGENT_PROMPT_VERSION,
+    build_action_repair_messages, build_agent_messages, build_react_messages,
+    build_prose_final_messages, build_prose_repair_messages,
 )
 from paper_assistant.agent_records import diagnostic_snapshot
-from paper_assistant.citations import validate_citations
+from paper_assistant.citations import validate_citations, validate_prose_citations
+from paper_assistant.js_runtime import JavaScriptError, RUNTIME_VERSION, run_javascript
+from paper_assistant.prose import EvidenceRegistry, normalize_citation_markers, parse_markers, prompt_sources, source_refs
 from paper_assistant.context import ContextError, restore_conversation_evidence, token_context_options, fit_autonomous_context
 from paper_assistant.conversation import normalize_planned_queries
 from paper_assistant.evidence_reading import (read_evidence_context, parent_children, reading_directory,
     retain_explicit_context)
 from paper_assistant.paper_information import load_paper_information
 from paper_assistant.llm_client import LLMCallError
+from paper_assistant.message_fit import context_fit_budget, count_request_tokens
 from paper_assistant.schemas import answer_evidence_status
 from paper_assistant.search import SearchError
 from paper_assistant.rerank_statistics import empty_rerank_statistics, sum_rerank_statistics
@@ -36,12 +41,13 @@ from paper_assistant.deadline import DeadlineExceeded, final_deadline, search_wi
 from paper_assistant.source_scope import (
     Registry, SourceScopeError, identify_source_requirement, merge_scoped_context, merge_planned_scoped_context,
     prepare_scoped_context, prepare_unavailable_source_context, validate_citation_scope,
+    validate_prose_citation_scope,
 )
 
 
-AGENT_VERSION = "d12-basis-aware-agent-v1"
-SCOPED_AGENT_VERSION = "d12-basis-aware-source-scope-budget-agent-v1"
-TIMED_AGENT_VERSION = "d12-basis-aware-budget-agent-v1"
+AGENT_VERSION = "d13-prose-compute-agent-v1"
+SCOPED_AGENT_VERSION = "d13-prose-compute-source-scope-budget-agent-v1"
+TIMED_AGENT_VERSION = "d13-prose-compute-budget-agent-v1"
 
 
 def _embedding_totals(rounds):
@@ -62,6 +68,158 @@ def _embedding_totals(rounds):
         total = sum(values) if values and all(valid) else None
         result[field] = round(total, 6) if total is not None and isfinite(total) else None
     return result
+
+
+def fit_agent_request(context, messages, *, context_length, max_tokens,
+                      native_search=False, native_javascript=False, protect_groups=1):
+    """Trim complete history groups or whole evidence chunks to fit capacity."""
+    tools = []
+    if native_search:
+        tools.extend([search_tool_definition(), read_context_tool_definition()])
+    if native_javascript:
+        tools.append(run_javascript_tool_definition())
+    tools = tools or None
+    budget = context_fit_budget(context_length, max_tokens)
+
+    def payload_of(message):
+        if not isinstance(message, dict) or message.get("role") != "user":
+            return None
+        try:
+            payload = json.loads(message["content"])
+        except (TypeError, ValueError):
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    def payload_ids(payload):
+        if not isinstance(payload, dict):
+            return []
+        ids = [row.get("chunk_id") for row in payload.get("shown_evidence") or []
+               if isinstance(row, dict)]
+        for section in payload.get("evidence_sections") or []:
+            for row in section.get("chunks") or []:
+                if isinstance(row, dict):
+                    ids.append(row.get("chunk_id"))
+        for row in payload.get("sources") or []:
+            if isinstance(row, dict):
+                ids.append(row.get("chunk_id"))
+        return [value for value in ids if isinstance(value, str) and value]
+
+    def sync(payloads_to_sync):
+        retained = []
+        for message in messages[1:]:
+            payload = payload_of(message)
+            for identifier in payload_ids(payload):
+                if identifier not in retained:
+                    retained.append(identifier)
+        shown = [row for row in context["shown_evidence"] if row["chunk_id"] in retained]
+        allowed = [row["chunk_id"] for row in shown]
+        existing = [row for row in context.get("omitted_evidence", [])
+                    if row.get("chunk_id") not in retained]
+        dropped = [{"chunk_id": row["chunk_id"], "rank": row["rank"], "reason": "token_budget"}
+                   for row in context["shown_evidence"] if row["chunk_id"] not in retained]
+        omitted = existing + dropped
+        context.update(shown_evidence=shown, allowed_citation_ids=allowed,
+                       shown_chars=sum(len(row["shown_text"]) for row in shown),
+                       omitted_evidence=omitted, candidate_count=len(shown) + len(omitted),
+                       max_chars=None,
+                       reading_origins=[origin for origin in context.get("reading_origins", [])
+                           if origin.get("chunk_id") in retained],
+                       empty_selection_reason=None if shown else
+                           ("no_hits" if not shown and not omitted else "character_budget"))
+        if "allowed_refs" in context:
+            context["allowed_refs"] = [row["ref"] for row in shown]
+        for message in messages:
+            payload = payload_of(message)
+            if payload is not None and ("allowed_citation_ids" in payload or "allowed_refs" in payload):
+                if "allowed_citation_ids" in payload:
+                    payload["allowed_citation_ids"] = list(allowed)
+                if "allowed_refs" in payload:
+                    payload["allowed_refs"] = [row["ref"] for row in shown]
+                message["content"] = json.dumps(payload, ensure_ascii=False, allow_nan=False)
+        return shown, dropped
+
+    def remove_original(identifier):
+        # Evict the same original from replay and final sources together; a
+        # leftover duplicate must not silently keep an evicted ref authorized.
+        for message in messages[1:]:
+            payload = payload_of(message)
+            if payload is None:
+                continue
+            for field in ("shown_evidence", "sources"):
+                if isinstance(payload.get(field), list):
+                    payload[field] = [row for row in payload[field] if row.get("chunk_id") != identifier]
+            if isinstance(payload.get("evidence_sections"), list):
+                for section in payload["evidence_sections"]:
+                    section["chunks"] = [row for row in section.get("chunks", []) if row.get("chunk_id") != identifier]
+                payload["evidence_sections"] = [section for section in payload["evidence_sections"] if section["chunks"]]
+            message["content"] = json.dumps(payload, ensure_ascii=False, allow_nan=False)
+
+    dropped_ids = []
+
+    def sync_and_record():
+        _shown, dropped = sync([])
+        for row in dropped:
+            if row["chunk_id"] not in dropped_ids:
+                dropped_ids.append(row["chunk_id"])
+
+    def user_groups():
+        starts = [index for index, message in enumerate(messages)
+                  if index > 0 and message.get("role") == "user"]
+        return [(start, starts[index + 1] if index + 1 < len(starts) else len(messages))
+                for index, start in enumerate(starts)]
+
+    while count_request_tokens(messages, tools) > budget:
+        groups = user_groups()
+        if len(groups) > protect_groups:
+            drop = set(range(groups[0][0], groups[0][1]))
+            messages[:] = [message for index, message in enumerate(messages) if index == 0 or index not in drop]
+            sync_and_record()
+            continue
+        changed = False
+        for message in messages[1:]:
+            payload = payload_of(message)
+            if payload is None:
+                continue
+            sections = payload.get("evidence_sections")
+            if isinstance(sections, list) and sections:
+                for section in sections:
+                    chunks = section.get("chunks") if isinstance(section, dict) else None
+                    if chunks:
+                        remove_original(chunks[0]["chunk_id"])
+                        changed = True
+                        break
+                if changed:
+                    break
+            rows = payload.get("shown_evidence") or payload.get("sources")
+            if isinstance(rows, list) and rows:
+                remove_original(rows[0]["chunk_id"])
+                changed = True
+                break
+        if not changed:
+            for message in messages[1:]:
+                payload = payload_of(message)
+                if payload is None:
+                    continue
+                locations = payload.get("candidate_locations")
+                if isinstance(locations, list) and locations:
+                    locations.pop(0)
+                    message["content"] = json.dumps(payload, ensure_ascii=False, allow_nan=False)
+                    changed = True
+                    break
+                for paper in payload.get("selected_papers") or []:
+                    directory = paper.get("reading_directory") if isinstance(paper, dict) else None
+                    if directory:
+                        directory.pop(0)
+                        message["content"] = json.dumps(payload, ensure_ascii=False, allow_nan=False)
+                        changed = True
+                        break
+                if changed:
+                    break
+        if not changed:
+            raise ContextError("request_too_large", "完整请求在裁剪后仍超过模型上下文容量")
+        sync_and_record()
+    sync_and_record()
+    return messages, dropped_ids
 
 
 def answer_question_agent(query, selected_versions, searcher, store, client, *,
@@ -85,25 +243,31 @@ def answer_question_agent(query, selected_versions, searcher, store, client, *,
               "citation_checks": [], "answer": None, "error": None,
               "failure_stage": "input", "stop_reason": None, "interrupted_failure": None,
               "retry_decision": None, "paper_information": [], "semantic_support_status": "not_reviewed",
+              "javascript_calls": [], "javascript_runtime": RUNTIME_VERSION,
               "statistics": {"embedding": None, "chat": None, "rerank": empty_rerank_statistics()}}
     stage = "input"
     budget = client.budget
     requirement, qualification, source_issue = None, None, None
     paper_information, version_chunks = [], {}
-    tool_history, accessible_parents = [], set()
-    prepared_answer = None
-    prepared_binding = None
-    context_options = token_context_options(registry=source_registry)
+    accessible_parents = set()
+    seen_evidence_ids = set()
+    full_context = autonomous_steps is not None
+    evidence_registry = EvidenceRegistry()
+    if full_context and source_registry is not None:
+        source_registry.full_context_mode = True
+    context_options = {} if full_context else token_context_options(registry=source_registry)
     if autonomous_steps is not None:
         result.update(retrieval_strategy="autonomous", autonomous_step_limit=autonomous_steps,
                       autonomous_steps_used=0, limit_finalize=False, evidence_calls_used=0, context_reads=[],
-                      prompt_version=AUTONOMOUS_PROMPT_VERSION, action_schema_version=AUTONOMOUS_ACTION_SCHEMA_VERSION)
+                      prompt_version=AUTONOMOUS_PROMPT_VERSION, action_schema_version=AUTONOMOUS_ACTION_SCHEMA_VERSION,
+                      loop_version="react-native-tools-v1", agent_version="d14-native-tool-loop-agent-v1",
+                      corrections=[], synthesis=None, recovery=None)
     if source_registry is not None:
         result.update(source_requirement=None, source_qualification=None,
                       initial_source_qualification=None, source_scope_checks=[])
 
     if timed:
-        result["budget_implementation_version"] = "d9-remaining-budget-v1"
+        result["budget_implementation_version"] = "react-iteration-and-invoke-retry-v1" if full_context else "d9-remaining-budget-v1"
         result["deadline_enforcement"] = "remaining_chat_timeout_and_retrieval_budget_adapter_and_stage_checks; hard_process_abort_unverified"
 
     def deadline():
@@ -116,6 +280,8 @@ def answer_question_agent(query, selected_versions, searcher, store, client, *,
             raise LLMCallError("budget_exceeded", "request_limit", "本轮没有剩余聊天请求额度")
 
     def finish():
+        if full_context:
+            result["evidence_registry"] = evidence_registry.snapshot()
         if budget.remaining_seconds() <= 0:
             if result["error"] and result["error"]["code"] != "deadline_exceeded":
                 result["interrupted_failure"] = {"status": result["status"],
@@ -196,8 +362,8 @@ def answer_question_agent(query, selected_versions, searcher, store, client, *,
             entry["source_qualification"] = deepcopy(scoped_qualification)
         if number == 1:
             context = restore_conversation_evidence(context, conversation_context, version_chunks,
-                max_chunks=5, source_registry=source_registry, source_requirement=requirement)
-            context = read_evidence_context(context, version_chunks, store=store, max_chunks=5,
+                max_chunks=None, source_registry=source_registry, source_requirement=requirement)
+            context = read_evidence_context(context, version_chunks, store=store, max_chunks=None,
                 source_registry=source_registry, source_requirement=requirement)
             entry["reading_origins"] = deepcopy(context["reading_origins"])
             if scoped_qualification is not None:
@@ -211,88 +377,44 @@ def answer_question_agent(query, selected_versions, searcher, store, client, *,
         # uses markers for noncanonical metadata, never the evidence context.
         return safe_search, context, scoped_qualification
 
+    def fit_request(context, messages, native_search, *, native_javascript=False, protect_groups=1):
+        return fit_agent_request(
+            context, messages,
+            context_length=getattr(client.settings, "context_length", None),
+            max_tokens=client.policy.max_tokens,
+            native_search=native_search, native_javascript=native_javascript,
+            protect_groups=protect_groups)
     def request_action(context, phase, *, repair_kind=None, previous=None, error_code=None,
                        field_issues=None):
+        """Legacy Action/Claim entry; interactive native prose never enters here."""
         nonlocal stage
-        kind = repair_kind
+        kind, repair_base = repair_kind, None
         while True:
             stage = ("citation_repair" if kind == "citation" else "action_repair") if kind else phase
             capacity()
             if kind and budget.repairs >= budget.policy.max_repairs:
                 raise LLMCallError("invalid_output", "repair_unavailable", "本轮共享修复额度已耗尽")
-            terminal_only = (kind == "citation" or phase in ("limit_final_decision", "prepared_final_decision")
-                             or (autonomous_steps is not None and result["autonomous_steps_used"] >= autonomous_steps))
-            loop_state = None
-            if autonomous_steps is not None and phase != "prepared_final_decision":
-                loop_state = {
-                    "autonomous_step_limit": autonomous_steps,
-                    "autonomous_step": result["autonomous_steps_used"],
-                    "remaining_steps": autonomous_steps - result["autonomous_steps_used"],
-                    "limit_finalize": result["limit_finalize"],
-                    "planned_queries": result.get("planned_queries", []),
-                    "remaining_evidence_calls": max(0, autonomous_steps - result["evidence_calls_used"]),
-                    "executed_actions": [{key: deepcopy(step.get(key)) for key in
-                        ("autonomous_step", "parsed_action", "tool_observation", "tool_calls", "limit_finalize")}
-                        for step in result["action_steps"]
-                        if step.get("parsed_action") is not None or step.get("tool_calls")],
-                }
-            if loop_state is not None:
-                for past in loop_state["executed_actions"]:
-                    for call in past.get("tool_calls") or []:
-                        call.get("tool_observation", {}).pop("visible_chunks", None)
-                        call.get("tool_observation", {}).pop("candidate_locations", None)
-            prepared_final = None
-            if phase == "prepared_final_decision":
-                prepared_final = build_prepared_final_messages(query, context, prepared_answer,
-                    prepared_messages=(prepared_binding or {}).get("messages"),
-                    prepared_response=((prepared_binding or {}).get("response") or {}).get("content"),
-                    conversation_context=conversation_context,
-                    source_requirement=requirement)
-            if kind:
-                messages = build_action_repair_messages(query, context, previous, phase=phase,
-                    error_code=error_code, repair_kind=kind,
-                    field_issues=field_issues,
-                    paper_information=paper_information,
-                    conversation_context=conversation_context,
-                    loop_state=loop_state,
-                    prepared_final_messages=prepared_final,
-                    **({"source_requirement": requirement} if requirement is not None else {}))
-            elif prepared_final is not None:
-                messages = prepared_final
-            else:
-                messages = build_agent_messages(query, context, phase=phase, terminal_only=terminal_only,
-                    paper_information=paper_information,
-                    conversation_context=conversation_context,
-                    loop_state=loop_state,
-                    **({"source_requirement": requirement} if requirement is not None else {}))
-            if loop_state is not None:
-                payload = json.loads(messages[1]["content"])
-                accessible_parents.update(entry["parent_id"] for paper in payload["selected_papers"]
-                                          for entry in paper.get("reading_directory", []))
-                accessible_parents.update(row["parent_id"] for row in context["shown_evidence"] if row.get("parent_id"))
-                messages[1:1] = deepcopy(tool_history)
-            native_search = (loop_state is not None and not terminal_only
-                             and result["evidence_calls_used"] < autonomous_steps)
-            deadline()
-            entry = {"phase": phase, "purpose": "repair" if kind else "answer",
-                     "repair_kind": kind, "terminal_only": terminal_only,
-                     "messages": deepcopy(messages),
-                     "allowed_citation_ids": deepcopy(context["allowed_citation_ids"]),
-                     "response": None, "parsed_action": None, "parse_error_code": None,
-                     "parse_error_fields": [],
-                     "error": None, "sdk_attempt_numbers": []}
-            if loop_state is not None:
-                entry.update(autonomous_step=loop_state["autonomous_step"],
-                             remaining_steps=loop_state["remaining_steps"],
-                             limit_finalize=result["limit_finalize"], tool_observation=None)
+            terminal_only = kind == "citation"
+            messages = (build_action_repair_messages(query, context, previous, phase=phase,
+                error_code=error_code, repair_kind=kind, field_issues=field_issues,
+                paper_information=paper_information, conversation_context=conversation_context,
+                base_messages=repair_base,
+                **({"source_requirement": requirement} if requirement is not None else {})) if kind else
+                build_agent_messages(query, context, phase=phase, terminal_only=terminal_only,
+                    paper_information=paper_information, conversation_context=conversation_context,
+                    **({"source_requirement": requirement} if requirement is not None else {})))
+            entry = {"phase": phase, "purpose": "repair" if kind else "answer", "repair_kind": kind,
+                "terminal_only": terminal_only, "messages": deepcopy(messages),
+                "allowed_citation_ids": deepcopy(context["allowed_citation_ids"]),
+                "response": None, "parsed_action": None, "parse_error_code": None,
+                "parse_error_fields": [], "error": None, "sdk_attempt_numbers": []}
             result["action_steps"].append(entry)
             start = len(budget.records)
             try:
-                response = client.invoke(messages, purpose=entry["purpose"], require_json=True,
-                    **({"tools": [search_tool_definition(), read_context_tool_definition()], "tool_choice": "auto"} if native_search else {}))
+                response = client.invoke(messages, purpose=entry["purpose"], require_json=True)
             except LLMCallError as error:
                 entry["error"] = {"status": error.status, "code": error.code,
-                                  "message": str(error), "attempts": deepcopy(error.attempts)}
+                    "message": str(error), "attempts": deepcopy(error.attempts)}
                 raise
             finally:
                 entry["sdk_attempt_numbers"] = [row["number"] for row in budget.records[start:]]
@@ -301,28 +423,17 @@ def answer_question_agent(query, selected_versions, searcher, store, client, *,
             try:
                 if response.get("status") != "success":
                     raise ActionParseError(response.get("output_issue") or "invalid_output")
-                if response.get("tool_calls") and native_search:
-                    entry["tool_calls"] = deepcopy(response["tool_calls"])
-                    return entry["tool_calls"]
                 action = parse_agent_action(response.get("content"), phase=phase,
-                                            has_shown_evidence=bool(context["shown_evidence"]),
-                                            terminal_only=terminal_only or loop_state is not None,
-                                            selected_versions=result["selected_versions"],
-                                            prepare_answer=loop_state is not None)
+                    has_shown_evidence=bool(context["shown_evidence"]), terminal_only=terminal_only,
+                    selected_versions=result["selected_versions"])
             except ActionParseError as error:
-                entry["parse_error_code"] = error.code
-                entry["parse_error_fields"] = deepcopy(error.field_issues)
-                deadline()
-                # A completed repair that is still invalid stays invalid_output.
-                # Request limits apply before another permitted call, not to
-                # overwrite the observed result of the last consumed request.
+                entry.update(parse_error_code=error.code, parse_error_fields=deepcopy(error.field_issues))
                 if kind or budget.repairs >= budget.policy.max_repairs:
                     raise LLMCallError("invalid_output", error.code, "模型动作在共享修复后仍未通过检查") from None
                 capacity()
-                kind = "action" if error.code in ("action_not_allowed", "paper_answer_requires_preparation") else "format"
-                error_code = error.code
-                field_issues = error.field_issues
-                previous = response.get("content")
+                repair_base = deepcopy(messages)
+                kind = "action" if error.code == "action_not_allowed" else "format"
+                error_code, field_issues, previous = error.code, error.field_issues, response.get("content")
                 continue
             entry["parsed_action"] = action.model_dump(mode="json")
             deadline()
@@ -379,6 +490,158 @@ def answer_question_agent(query, selected_versions, searcher, store, client, *,
                                     error_code="source_scope_invalid" if source_invalid else "citation_invalid")
         return fail("invalid_output", "citation_invalid", "引用检查未通过")
 
+    def publish_prose(text, checked, context, phase):
+        nonlocal stage
+        stage = "citations"
+        citations = deepcopy(checked.get("citations") or [])
+        answer = {"text": text, "citations": citations,
+                  "evidence_refs": deepcopy(checked.get("evidence_refs") or []),
+                  "evidence_sources": deepcopy(checked.get("evidence_sources") or []),
+                  "evidence_status": "paper_only" if citations else "none",
+                  "semantic_support_status": "not_reviewed"}
+        result.update(status="answered", failure_stage=None, error=None, answer=answer,
+                      answer_format="prose_citations_v1", final_prompt_version=(AUTONOMOUS_PROMPT_VERSION
+                          if phase in ("react_loop", "recovery") else PROSE_FINAL_PROMPT_VERSION))
+        if result["stop_reason"] is None:
+            result["stop_reason"] = ("step_limit_answered" if result["limit_finalize"] else "answered")
+        return finish()
+
+    def _final_sources(messages, refs):
+        payload = {}
+        for message in reversed(messages):
+            if not isinstance(message, dict) or message.get("role") != "user":
+                continue
+            try:
+                candidate = json.loads(message["content"])
+            except (TypeError, ValueError):
+                continue
+            if isinstance(candidate, dict) and "sources" in candidate:
+                payload = candidate
+                break
+        kept = {row.get("ref") for row in payload.get("sources") or [] if isinstance(row, dict)}
+        return [row for row in refs if row["ref"] in kept], sorted(kept)
+
+    def execute_javascript(call):
+        try:
+            parsed = parse_run_javascript_call(call)
+            call["parsed_action"] = {"action": "run_javascript", "code": parsed.code}
+            try:
+                outcome = run_javascript(parsed.code)
+                result["javascript_calls"].append({
+                    "status": "success", "elapsed_seconds": outcome["elapsed_seconds"],
+                    "stdout_chars": outcome["stdout_chars"],
+                    "v8_version": outcome.get("v8_version")})
+                return {"status": "success", **outcome}
+            except JavaScriptError as error:
+                observation = {"status": "tool_error",
+                               "error": {"code": error.code, "message": str(error)}}
+                result["javascript_calls"].append(deepcopy(observation))
+                return observation
+        except ActionParseError as error:
+            return {"status": "invalid_arguments", "error": {"code": error.code,
+                "message": "工具参数无效；run_javascript 只接受非空 code。"}}
+
+    def request_prose_final(context, phase, *, prepared_messages=None, prepared_response=None,
+                            preparation=None):
+        evidence_registry.stamp(context)
+        refs = source_refs(context, evidence_registry)
+        sources = prompt_sources(refs)
+        missing = ((preparation or {}).get("missing_information")
+                   or context.get("evidence_limitation"))
+        base = build_prose_final_messages(query, context, sources=sources, phase=phase,
+            prepared_messages=prepared_messages, prepared_response=prepared_response,
+            conversation_context=conversation_context, source_requirement=requirement,
+            missing_information=missing)
+        previous, error_code, actual_refs, actual_numbers = None, None, refs, [row["ref"] for row in refs]
+        attempt = 0
+        while True:
+            if attempt:
+                if budget.repairs >= budget.policy.max_repairs:
+                    raise LLMCallError("invalid_output", "repair_unavailable", "本轮共享修复额度已耗尽")
+                messages = build_prose_repair_messages(
+                    fitted, previous, error_code=error_code, allowed_refs=actual_numbers)
+            else:
+                messages = deepcopy(base)
+            native_javascript = (full_context and not attempt
+                                 and result["autonomous_steps_used"] < autonomous_steps)
+            if not native_javascript:
+                messages[0]["content"] += "\nNo tools are available in this request. Return the final answer using the provided originals and any completed calculations."
+            if full_context:
+                messages, dropped_ids = fit_request(context, messages, False,
+                    native_javascript=native_javascript, protect_groups=3)
+                if dropped_ids:
+                    seen_evidence_ids.difference_update(dropped_ids)
+                result["context"] = deepcopy(context)
+            actual_refs, actual_numbers = _final_sources(messages, refs)
+            deadline()
+            entry = {"phase": phase, "purpose": "repair" if attempt else "answer",
+                     "repair_kind": "citation" if attempt and error_code in
+                         ("citation_unknown_ref", "citation_not_shown", "source_constraint_ambiguous",
+                          "citation_source_scope_mismatch") else ("format" if attempt else None),
+                     "terminal_only": not native_javascript, "final_prose": True,
+                     "messages": deepcopy(messages), "allowed_refs": list(actual_numbers),
+                     "allowed_citation_ids": [row["chunk_id"] for row in actual_refs],
+                     "response": None, "parsed_action": None, "parse_error_code": error_code,
+                     "parse_error_fields": [], "error": None, "sdk_attempt_numbers": []}
+            result["action_steps"].append(entry)
+            start = len(budget.records)
+            try:
+                response = client.invoke(messages, purpose=entry["purpose"], require_json=False,
+                    **({"tools": [run_javascript_tool_definition()], "tool_choice": "auto"}
+                       if native_javascript else {}))
+            except LLMCallError as error:
+                entry["error"] = {"status": error.status, "code": error.code,
+                                  "message": str(error), "attempts": deepcopy(error.attempts)}
+                raise
+            finally:
+                entry["sdk_attempt_numbers"] = [row["number"] for row in budget.records[start:]]
+            entry["response"] = deepcopy(response)
+            deadline()
+            if response.get("status") != "success":
+                error_code = response.get("output_issue") or "invalid_output"
+                previous = response.get("content") or ""
+                if attempt or budget.repairs >= budget.policy.max_repairs:
+                    raise LLMCallError("invalid_output", error_code, "最终正文生成未产生完整结果")
+                fitted = deepcopy(messages)
+                attempt = 1
+                continue
+            if response.get("tool_calls") and native_javascript:
+                result["autonomous_steps_used"] += 1
+                entry.update(autonomous_step=result["autonomous_steps_used"],
+                             remaining_steps=autonomous_steps - result["autonomous_steps_used"],
+                             tool_calls=deepcopy(response["tool_calls"]))
+                base = deepcopy(messages)
+                base.append({"role": "assistant", "content": response.get("content"),
+                             "tool_calls": deepcopy(response["tool_calls"])})
+                for call in entry["tool_calls"]:
+                    observation = execute_javascript(call)
+                    call["tool_observation"] = deepcopy(observation)
+                    base.append({"role": "tool", "tool_call_id": call["id"],
+                                 "content": json.dumps(observation, ensure_ascii=False, allow_nan=False)})
+                    deadline()
+                if result["autonomous_steps_used"] >= autonomous_steps:
+                    result["limit_finalize"] = True
+                continue
+            text = normalize_citation_markers(response.get("content") or "")
+            checked = validate_prose_citations(text, actual_refs, context, store,
+                                               project_root=project_root)
+            result["citation_checks"].append(deepcopy(checked))
+            if source_registry is not None:
+                scoped = validate_prose_citation_scope(checked.get("citations") or [], context,
+                                                       qualification, source_registry, requirement=requirement)
+                result["source_scope_checks"].append(deepcopy(scoped))
+                if scoped["status"] != "valid":
+                    checked = scoped
+            if checked["status"] == "valid":
+                return text, checked
+            error_code = (checked.get("error") or {}).get("code") or "citation_invalid"
+            previous = text
+            if attempt or budget.repairs >= budget.policy.max_repairs:
+                raise LLMCallError("invalid_output", error_code,
+                                   "最终正文引用或来源检查未通过")
+            fitted = deepcopy(messages)
+            attempt = 1
+
     def answer_with_limitation(context, reason, stop_reason):
         nonlocal qualification
         deadline()
@@ -390,45 +653,26 @@ def answer_question_agent(query, selected_versions, searcher, store, client, *,
         else:
             context = {**deepcopy(context), "evidence_limitation": reason}
         result.update(context=deepcopy(context), stop_reason=stop_reason)
-        action = request_action(context, "final_decision")
-        return publish(action, context, "final_decision")
-
-    def finalize_prepared(action, *, binding, no_direction_reason=None):
-        nonlocal prepared_answer, prepared_binding
-        prepared_answer = action.model_dump(mode="json")
-        prepared_binding = deepcopy(binding)
-        if no_direction_reason is not None:
-            prepared_answer["missing_information"] = "\n".join(part for part in
-                (prepared_answer["missing_information"], "No reliable further evidence direction: " + no_direction_reason) if part)
-            result["stop_reason"] = "no_reliable_evidence_direction"
-        final_context = deepcopy(binding["context"])
-        result["context"] = deepcopy(final_context)
-        final = request_action(final_context, "prepared_final_decision")
-        return publish(final, final_context, "prepared_final_decision")
+        text, checked = request_prose_final(context, "final_decision")
+        return publish_prose(text, checked, context, "final_decision")
 
     def run_autonomous():
         nonlocal stage, qualification
         searches, query_indices, seen_queries, recalled_ids = [], [], set(), set()
         explicit_rows, known_candidates = {}, {}
         required_rows, target_ids = [], []
-        pending_preparation, pending_binding = None, None
         saved_chunks = {row["chunk_id"]: row for rows in version_chunks.values() for row in rows}
-
-        def bind_preparation():
-            step = result["action_steps"][-1]
-            return {"messages": deepcopy(step["messages"]), "response": deepcopy(step["response"]),
-                    "context": deepcopy(context)}
 
         def merge_current():
             nonlocal qualification
             merged = (merge_planned_scoped_context(searches, query, pairs, source_registry,
-                        max_chars=max_chars, **context_options, max_chunks=8, requirement=requirement,
+                        max_chars=max_chars, **context_options, max_chunks=None, requirement=requirement,
                         query_indices=query_indices, round_kind="adaptive") if source_registry is not None else
                       merge_planned_context(searches, query, pairs, max_chars=max_chars, **context_options,
-                                            max_chunks=8, query_indices=query_indices, round_kind="adaptive"))
+                                            max_chunks=None, query_indices=query_indices, round_kind="adaptive"))
             context = restore_conversation_evidence(merged["context"], conversation_context, version_chunks,
-                max_chunks=8, source_registry=source_registry, source_requirement=requirement)
-            context = read_evidence_context(context, version_chunks, store=store, max_chunks=8, anchors_first=True,
+                max_chunks=None, source_registry=source_registry, source_requirement=requirement)
+            context = read_evidence_context(context, version_chunks, store=store, max_chunks=None, anchors_first=True,
                 source_registry=source_registry, source_requirement=requirement)
             if explicit_rows or required_rows:
                 context = retain_explicit_context(context, list(explicit_rows.values()), source_registry=source_registry,
@@ -439,7 +683,7 @@ def answer_question_agent(query, selected_versions, searcher, store, client, *,
                 omission_reasons.update({identifier: "source_scope" for identifier, row in known_candidates.items()
                                          if not source_registry.qualify(row)["eligible"]})
             context = fit_autonomous_context(context, paper_information, list(known_candidates.values()),
-                                             omission_reasons=omission_reasons)
+                                             omission_reasons=omission_reasons, evidence_registry=evidence_registry)
             # Only actual displayed originals and real tool returns grant chunk-reading access.
             for row in context["shown_evidence"]:
                 known_candidates.setdefault(row["chunk_id"], {**deepcopy(row), "text": row["shown_text"]})
@@ -564,79 +808,184 @@ def answer_question_agent(query, selected_versions, searcher, store, client, *,
         result["initial_context"] = deepcopy(context)
         if source_registry is not None:
             result["initial_source_qualification"] = deepcopy(qualification)
-        for number in range(1, autonomous_steps + 1):
-            result["autonomous_steps_used"] = number
-            phase = ("gap_evidence_decision" if pending_preparation is not None and number < autonomous_steps
-                     else "autonomous_decision")
-            action = request_action(context, phase)
-            if isinstance(action, PrepareAnswerAction):
-                required_ids = {identifier for fact in action.facts for identifier in fact.citation_ids}
-                required_rows = [{**deepcopy(row), "text": row["shown_text"]} for row in context["shown_evidence"]
-                                 if row["chunk_id"] in required_ids]
-                binding = bind_preparation()
-                if (action.answerable or number >= autonomous_steps
-                        or result["evidence_calls_used"] >= autonomous_steps):
-                    if not action.answerable:
-                        result["limit_finalize"] = True
-                    return finalize_prepared(action, binding=binding)
-                pending_preparation, pending_binding = action, binding
-                continue
-            if isinstance(action, InsufficientEvidenceAction):
-                return finalize_prepared(pending_preparation, binding=pending_binding,
-                                         no_direction_reason=action.reason)
-            if isinstance(action, AnswerAction):
-                # Autonomous parsing permits only uncited general knowledge here;
-                # selected-paper answers must pass through finalize_prepared.
-                return publish(action, context, "autonomous_decision")
-            action_entry = result["action_steps"][-1]
-            tool_history[:] = deepcopy(action_entry["messages"][1:])
-            for message in tool_history:
-                if message["role"] == "user":
-                    old_payload = json.loads(message["content"])
-                    if "question" in old_payload:
-                        message["content"] = json.dumps({"question": old_payload["question"],
-                            "autonomous_step": old_payload.get("autonomous_step")}, ensure_ascii=False)
-            tool_history.append({"role": "assistant", "content": action_entry["response"].get("content"),
-                                 "tool_calls": deepcopy(action_entry["response"]["tool_calls"])})
-            for call in action:
-                if result["evidence_calls_used"] >= autonomous_steps:
-                    observation = {"status": "evidence_limit", "message": "search/read_context 共用取证额度已耗尽。"}
-                else:
-                    result["evidence_calls_used"] += 1
-                    try:
-                        if call["function"]["name"] == "read_context":
-                            parsed = parse_read_context_call(call)
-                            call["parsed_action"] = {"action": "read_context", **parsed.model_dump(mode="json", exclude_none=True)}
-                            observation = execute_read(parsed)
-                        else:
-                            parsed = parse_search_tool_call(call, selected_versions=result["selected_versions"])
-                            call["parsed_action"] = parsed.model_dump(mode="json")
-                            observation = execute_search(parsed, number)
-                    except ActionParseError as error:
-                        observation = {"status": "invalid_arguments", "error": {"code": error.code,
-                            "message": "工具参数无效；请使用当前工具字段与可用入口。"}}
-                call["tool_observation"] = deepcopy(observation)
-                # Original bodies live once in the current evidence_sections; the tool reply retains locations.
-                if observation.get("new_shown_ids"):
-                    pending_preparation, pending_binding = None, None
-                # Candidate locations are budgeted once in the current evidence view.
-                reply = {key: deepcopy(value) for key, value in observation.items()
-                         if key not in ("visible_chunks", "candidate_locations")}
-                tool_history.append({"role": "tool", "tool_call_id": call["id"],
-                    "content": json.dumps(reply, ensure_ascii=False, allow_nan=False)})
-                deadline()
-            if result["evidence_calls_used"] >= autonomous_steps:
-                break
-        result["limit_finalize"] = True
-        context = {**deepcopy(context), "evidence_limitation": "\n".join(part for part in (
-            context.get("evidence_limitation"),
-            "已达到自主决策或检索额度；请根据现有证据回答完整原问题，并明确尚未取得证据的部分。") if part)}
-        result["context"] = deepcopy(context)
-        result["autonomous_steps_used"] = min(autonomous_steps, result["autonomous_steps_used"] + 1)
-        action = request_action(context, "limit_final_decision")
-        if isinstance(action, PrepareAnswerAction):
-            return finalize_prepared(action, binding=bind_preparation())
-        return publish(action, context, "limit_final_decision")
+        # RAGFlow agentic_rag/agent.go: one native tool/prose loop. Tool
+        # failures are observations; only a completed tool-free output is final.
+        history, correction, validated_final = [], None, None
+
+        def accept(response, entry):
+            if response.get("status") != "success":
+                return response.get("output_issue") or "invalid_output"
+            if response.get("tool_calls"):
+                return "unexpected_tool_calls"
+            text = normalize_citation_markers(response.get("content") or "")
+            try:
+                structured = json.loads(text)
+            except ValueError:
+                structured = None
+            if isinstance(structured, (dict, list)):
+                return "unexpected_action_json"
+            checked = validate_prose_citations(text, source_refs(context, evidence_registry), context, store,
+                                               project_root=project_root)
+            result["citation_checks"].append(deepcopy(checked))
+            if source_registry is not None:
+                scoped = validate_prose_citation_scope(checked.get("citations") or [], context,
+                    qualification, source_registry, requirement=requirement)
+                result["source_scope_checks"].append(deepcopy(scoped))
+                if scoped["status"] != "valid":
+                    checked = scoped
+            if checked["status"] != "valid":
+                return (checked.get("error") or {}).get("code") or "citation_invalid"
+            entry.update(final_prose=True, parsed_action={"action": "final_answer"})
+            return text, checked, deepcopy(context)
+
+        def invoke_turn(number, *, synthesis=False):
+            nonlocal stage
+            stage = "synthesis" if synthesis else "react_loop"
+            evidence_registry.stamp(context)
+            new_ids = [row["chunk_id"] for row in context["shown_evidence"] if row["chunk_id"] not in seen_evidence_ids]
+            messages = build_react_messages(query, context, paper_information=paper_information,
+                conversation_context=conversation_context, history=[] if synthesis else history,
+                remaining_rounds=max(0, autonomous_steps - number),
+                new_evidence_ids=new_ids, synthesis=synthesis, source_requirement=requirement)
+            if synthesis:
+                # Keep completed local calculations; never recover process text,
+                # a preparation envelope or an answer from input history.
+                calculations = [call["tool_observation"] for step in result["action_steps"]
+                    for call in step.get("tool_calls", [])
+                    if (call.get("function") or {}).get("name") == "run_javascript"
+                    and (call.get("tool_observation") or {}).get("status") == "success"]
+                payload = json.loads(messages[-1]["content"])
+                payload["completed_calculations"] = calculations
+                messages[-1]["content"] = json.dumps(payload, ensure_ascii=False, allow_nan=False)
+            elif correction:
+                messages.append({"role": "user", "content": json.dumps({
+                    "request": "correct_current_turn", "error": correction,
+                    "instruction": "Correct this output or tool error within the same loop. Use native tools or a complete prose answer; no action/facts JSON. Keep the original question and current allowed_refs."},
+                    ensure_ascii=False)})
+            messages, dropped = fit_request(context, messages, not synthesis, native_javascript=not synthesis)
+            seen_evidence_ids.update(new_ids)
+            seen_evidence_ids.difference_update(dropped)
+            result["context"] = deepcopy(context)
+            for message in messages[1:]:
+                if message.get("role") != "user":
+                    continue
+                payload = json.loads(message["content"])
+                accessible_parents.update(d["parent_id"] for p in payload.get("selected_papers", [])
+                                          for d in p.get("reading_directory", []))
+            accessible_parents.update(row["parent_id"] for row in context["shown_evidence"] if row.get("parent_id"))
+            entry = {"phase": stage, "purpose": "synthesis" if synthesis else "repair" if correction else "answer",
+                "repair_kind": correction, "autonomous_step": number,
+                "remaining_steps": max(0, autonomous_steps - number), "limit_finalize": synthesis,
+                "messages": deepcopy(messages), "allowed_refs": list(context["allowed_refs"]),
+                "allowed_citation_ids": list(context["allowed_citation_ids"]),
+                "response": None, "parsed_action": None, "parse_error_code": None,
+                "error": None, "sdk_attempt_numbers": []}
+            result["action_steps"].append(entry)
+            start = len(budget.records)
+            try:
+                response = client.invoke(messages, purpose=entry["purpose"], require_json=False,
+                    **({"request_timeout": 90.0} if synthesis else {"tools": [search_tool_definition(),
+                        read_context_tool_definition(), run_javascript_tool_definition()], "tool_choice": "auto"}))
+                entry["response"] = deepcopy(response)
+                return response, entry, messages
+            except LLMCallError as error:
+                entry["error"] = {"status": error.status, "code": error.code,
+                    "attempts": deepcopy(error.attempts)}
+                raise
+            finally:
+                entry["sdk_attempt_numbers"] = [row["number"] for row in budget.records[start:]]
+
+        def finalize(trigger, error=None):
+            if validated_final is not None:
+                result["recovery"] = {"kind": "validated_final", "trigger": trigger, "model_requests": 0}
+                result["stop_reason"] = "recovered_final_answer"
+                return publish_prose(*validated_final, "recovery")
+            # Nonretryable authentication/configuration failures cannot be cured
+            # by another model call. A stopped/expired caller is not detached.
+            if error is not None and (getattr(error, "code", "") in
+                    ("configuration_error", "client_closed", "invalid_input", "deadline_exceeded", "request_limit")
+                    or any(a.get("http_status") in (401, 403) for a in getattr(error, "attempts", []))):
+                return fail(error.status, error.code, str(error))
+            result["limit_finalize"] = trigger == "iteration_limit"
+            result["synthesis"] = {"trigger": trigger, "status": "attempted", "timeout_seconds": 90.0}
+            try:
+                response, entry, _ = invoke_turn(result["autonomous_steps_used"], synthesis=True)
+                accepted = accept(response, entry)
+                if isinstance(accepted, str):
+                    entry["parse_error_code"] = accepted
+                    result["synthesis"]["status"] = "invalid_output"
+                    return fail("invalid_output", accepted, "无工具综合未产生有效正文或引用")
+                result["synthesis"]["status"] = "completed"
+                result["stop_reason"] = "iteration_limit_synthesized" if trigger == "iteration_limit" else "error_synthesized"
+                return publish_prose(*accepted, "synthesis")
+            except LLMCallError as failure:
+                result["synthesis"]["status"] = "failed"
+                return fail(failure.status, failure.code, str(failure))
+            except Exception as failure:
+                result["synthesis"]["status"] = "failed"
+                return fail("tool_error", getattr(failure, "code", "synthesis_local_error"), "无工具综合未完成")
+
+        try:
+            for number in range(1, autonomous_steps + 1):
+                result["autonomous_steps_used"] = number
+                response, entry, messages = invoke_turn(number)
+                history[:] = deepcopy(messages[1:])
+                calls = response.get("tool_calls") or []
+                if response.get("status") == "success" and calls:
+                    entry["tool_calls"] = deepcopy(calls)
+                    history.append({"role": "assistant", "content": response.get("content"), "tool_calls": deepcopy(calls)})
+                    correction = None
+                    for call in entry["tool_calls"]:
+                        name = (call.get("function") or {}).get("name")
+                        try:
+                            if name == "run_javascript":
+                                observation = execute_javascript(call)
+                            elif name == "read_context":
+                                result["evidence_calls_used"] += 1
+                                parsed = parse_read_context_call(call)
+                                call["parsed_action"] = {"action": name, **parsed.model_dump(mode="json", exclude_none=True)}
+                                observation = execute_read(parsed)
+                            elif name == "search":
+                                result["evidence_calls_used"] += 1
+                                parsed = parse_search_tool_call(call, selected_versions=result["selected_versions"])
+                                call["parsed_action"] = parsed.model_dump(mode="json")
+                                observation = execute_search(parsed, number)
+                            else:
+                                observation = {"status": "unknown_tool", "message": "工具不可用；使用当前已提供工具或根据现有原文回答。"}
+                        except ActionParseError as failure:
+                            observation = {"status": "invalid_arguments", "error": {"code": failure.code,
+                                "message": "工具字段或所选版本范围无效，请修正参数。"}}
+                        except Exception as failure:
+                            observation = {"status": "tool_error", "error": {"code": getattr(failure, "code", "tool_execution_error"),
+                                "message": "本次工具未完成，已有原文保留；可修正请求或利用已有材料回答。"}}
+                        if "shown_ids" in observation:
+                            wanted = set(observation["shown_ids"])
+                            observation["shown_refs"] = [{"ref": row["ref"], "chunk_id": row["chunk_id"]}
+                                for row in context["shown_evidence"] if row["chunk_id"] in wanted]
+                        if observation.get("status") in ("tool_error", "invalid_arguments", "unknown_tool"):
+                            correction = "tool_error"
+                            result["corrections"].append({"round": number, "kind": correction, "tool": name})
+                        call["tool_observation"] = deepcopy(observation)
+                        reply = {k: deepcopy(v) for k, v in observation.items() if k not in ("visible_chunks", "candidate_locations")}
+                        history.append({"role": "tool", "tool_call_id": call["id"],
+                            "content": json.dumps(reply, ensure_ascii=False, allow_nan=False)})
+                    continue
+                accepted = accept(response, entry)
+                if not isinstance(accepted, str):
+                    validated_final = accepted
+                    return publish_prose(*accepted, "react_loop")
+                correction = accepted
+                entry["parse_error_code"] = accepted
+                result["corrections"].append({"round": number, "kind": accepted})
+                if response.get("content"):
+                    history.append({"role": "assistant", "content": response["content"]})
+            return finalize("iteration_limit")
+        except LLMCallError as error:
+            result["interrupted_failure"] = {"status": error.status, "code": error.code, "stage": stage}
+            return finalize(error.code, error)
+        except Exception as error:
+            result["interrupted_failure"] = {"status": "tool_error", "code": getattr(error, "code", "local_error"), "stage": stage}
+            return finalize(getattr(error, "code", "local_error"))
 
     try:
         if not isinstance(query, str) or not query.strip():
@@ -645,8 +994,12 @@ def answer_question_agent(query, selected_versions, searcher, store, client, *,
             raise ContextError("invalid_top_k", "D8 首轮与补轮 top_k 必须为 5")
         if type(max_chars) is not int or not 1 <= max_chars <= 8000:
             raise ContextError("invalid_character_budget", "正文字符预算必须为 1–8000 的整数")
-        if autonomous_steps is not None and (type(autonomous_steps) is not int or not 1 <= autonomous_steps <= 5):
-            raise ContextError("invalid_autonomous_steps", "自主决策步数必须为 1–5 的整数")
+        if autonomous_steps is not None and (type(autonomous_steps) is not int or autonomous_steps <= 0):
+            raise ContextError("invalid_autonomous_steps", "自主循环轮数必须为正整数")
+        if full_context:
+            max_chars = None
+            result["max_chars"] = None
+            result["context_capacity_mode"] = "full_request"
         if not isinstance(selected_versions, list) or not 1 <= len(selected_versions) <= 3:
             raise ContextError("invalid_versions", "必须选择 1–3 个完整论文/处理版本配对")
         pairs = []
@@ -664,7 +1017,7 @@ def answer_question_agent(query, selected_versions, searcher, store, client, *,
             result["planned_queries"] = deepcopy(planned_queries)
             if autonomous_steps is None:
                 result["retrieval_strategy"] = "planned_queries" if len(planned_queries) > 1 else "single_query"
-        if ((budget.policy.max_attempts is not None and budget.policy.max_attempts > 3) or budget.policy.max_repairs > 1
+        if not full_context and ((budget.policy.max_attempts is not None and budget.policy.max_attempts > 3) or (budget.policy.max_repairs is None or budget.policy.max_repairs > 1)
                 or budget.policy.max_network_retries > 1 or budget.policy.request_timeout > 30
                 or (budget.policy.total_timeout is not None and
                     (budget.policy.total_timeout > 120 or budget.deadline - budget.started > 120))):
@@ -716,13 +1069,13 @@ def answer_question_agent(query, selected_versions, searcher, store, client, *,
                 query_indices.append(number)
             stage = "planned_merge_context"
             merged = (merge_planned_scoped_context(searches, query, pairs, source_registry,
-                        max_chars=max_chars, **context_options, max_chunks=8, requirement=requirement,
+                        max_chars=max_chars, **context_options, max_chunks=None, requirement=requirement,
                         query_indices=query_indices) if source_registry is not None else
                         merge_planned_context(searches, query, pairs, max_chars=max_chars, **context_options,
-                                              max_chunks=8, query_indices=query_indices))
+                                              max_chunks=None, query_indices=query_indices))
             context = restore_conversation_evidence(merged["context"], conversation_context, version_chunks,
-                max_chunks=8, source_registry=source_registry, source_requirement=requirement)
-            context = read_evidence_context(context, version_chunks, store=store, max_chunks=8, anchors_first=True,
+                max_chunks=None, source_registry=source_registry, source_requirement=requirement)
+            context = read_evidence_context(context, version_chunks, store=store, max_chunks=None, anchors_first=True,
                 source_registry=source_registry, source_requirement=requirement)
             shown = set(context["allowed_citation_ids"])
             for row in result["search_rounds"]:
@@ -731,7 +1084,7 @@ def answer_question_agent(query, selected_versions, searcher, store, client, *,
                     if not any(item["chunk_id"] in shown for item in search["results"]):
                         gaps.append(f"计划查询 {row['round']}（{row['query']}）没有进入最终上下文的原文证据。")
             if gaps:
-                context["evidence_limitation"] = "本轮部分信息需求未取得可用原文，不能宣称完整查证：\n" + "\n".join(gaps)
+                context["evidence_limitation"] = "本轮部分信息需求未取得可用原文，不能声称完整查证：\n" + "\n".join(gaps)
             merged["trace"].update(final_shown_ids=deepcopy(context["allowed_citation_ids"]),
                                    reading_origins=deepcopy(context["reading_origins"]))
             result.update(search=deepcopy(searches[0]) if searches else None,
@@ -749,11 +1102,11 @@ def answer_question_agent(query, selected_versions, searcher, store, client, *,
             plan_pairs = [(v["paper_id"], v["parse_revision"]) for v in plan["selected_versions"]]
             search, _, _ = retrieve(plan["query"], 1, selected_pairs=plan_pairs, kind="planned", prepare=False)
             prepared = (merge_planned_scoped_context([search], query, pairs, source_registry,
-                max_chars=max_chars, **context_options, max_chunks=5, requirement=requirement) if source_registry is not None else
-                merge_planned_context([search], query, pairs, max_chars=max_chars, **context_options, max_chunks=5))
+                max_chars=max_chars, **context_options, max_chunks=None, requirement=requirement) if source_registry is not None else
+                merge_planned_context([search], query, pairs, max_chars=max_chars, **context_options, max_chunks=None))
             context = restore_conversation_evidence(prepared["context"], conversation_context, version_chunks,
-                max_chunks=5, source_registry=source_registry, source_requirement=requirement)
-            context = read_evidence_context(context, version_chunks, store=store, max_chunks=5,
+                max_chunks=None, source_registry=source_registry, source_requirement=requirement)
+            context = read_evidence_context(context, version_chunks, store=store, max_chunks=None,
                 source_registry=source_registry, source_requirement=requirement)
             qualification = prepared.get("qualification")
             if qualification is not None:
@@ -791,16 +1144,16 @@ def answer_question_agent(query, selected_versions, searcher, store, client, *,
         deadline()
         if planned_queries:
             merged = (merge_planned_scoped_context([search, retried], query, pairs, source_registry,
-                        max_chars=max_chars, **context_options, max_chunks=8, requirement=requirement, retry_first=True) if source_registry is not None else
+                        max_chars=max_chars, **context_options, max_chunks=None, requirement=requirement, retry_first=True) if source_registry is not None else
                         merge_planned_context([search, retried], query, pairs,
-                            max_chars=max_chars, **context_options, max_chunks=8, retry_first=True))
+                            max_chars=max_chars, **context_options, max_chunks=None, retry_first=True))
         else:
             merged = (merge_scoped_context(search, retried, query, pairs, source_registry,
-                    max_chars=max_chars, **context_options, max_chunks=8, requirement=requirement) if source_registry is not None else
-                    merge_agent_context(search, retried, query, pairs, max_chars=max_chars, **context_options, max_chunks=8))
+                    max_chars=max_chars, **context_options, max_chunks=None, requirement=requirement) if source_registry is not None else
+                    merge_agent_context(search, retried, query, pairs, max_chars=max_chars, **context_options, max_chunks=None))
         context = restore_conversation_evidence(merged["context"], conversation_context, version_chunks,
-            max_chunks=8, source_registry=source_registry, source_requirement=requirement)
-        context = read_evidence_context(context, version_chunks, store=store, max_chunks=8,
+            max_chunks=None, source_registry=source_registry, source_requirement=requirement)
+        context = read_evidence_context(context, version_chunks, store=store, max_chunks=None,
             source_registry=source_registry, source_requirement=requirement)
         merged["trace"].update(initial_shown_ids=deepcopy(result["initial_context"]["allowed_citation_ids"]),
                                final_shown_ids=deepcopy(context["allowed_citation_ids"]),

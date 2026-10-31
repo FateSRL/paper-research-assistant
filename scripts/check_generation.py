@@ -193,6 +193,10 @@ class ContextChecks(unittest.TestCase):
         self.assertNotIn(DIRECT_ANSWER_RULES, autonomous_messages[0]["content"])
         from paper_assistant.agent_prompt import EVIDENCE_QUOTE_ANSWER_RULES, FACT_PREPARATION_RULES
         self.assertIn(FACT_PREPARATION_RULES, autonomous_messages[0]["content"])
+        self.assertIn("necessary parallel items", autonomous_messages[0]["content"])
+        self.assertIn("An unasked whole-paper inventory", autonomous_messages[0]["content"])
+        self.assertIn("formal necessity proof", autonomous_messages[0]["content"])
+        self.assertNotIn("unasked formal\nalgorithm, complete inventory, exact count", autonomous_messages[0]["content"])
         self.assertNotIn(EVIDENCE_QUOTE_ANSWER_RULES, messages[0]["content"])
         self.assertIn("CONTIGUOUS verbatim substring", autonomous_messages[0]["content"])
         self.assertIn("prepare_answer", autonomous_messages[0]["content"])
@@ -270,19 +274,45 @@ class ContextChecks(unittest.TestCase):
                      evidence("early", text="Original earlier section", rank=2)]
         for row, section in zip(originals, (["2 Results"], ["1 Methods"])):
             row.update(parent_id="parent-" + row["chunk_id"], section_path=section, title="Paper A")
+        table_original = evidence("table-row", text="Table 4: Read table\n<tr><td>BERT</td><td>0.93</td></tr>",
+                                  rank=3)
+        table_original.update(parent_id="parent-table-read", section_path=["3 Tables"], content_type="table")
+        originals.append(table_original)
         structured = select_context(originals, [("p1", "r1")], max_tokens=8192)
         structured["question"] = question
+        from types import SimpleNamespace
+        from paper_assistant.evidence_reading import reading_directory
+        directory_store = SimpleNamespace(get_version_parents=lambda paper_id, parse_revision: [
+            {"section_path": ["1 Methods"], "parent_id": "parent-early", "pdf_pages": [2], "content_type": "body"},
+            {"section_path": [], "parent_id": "parent-missing-name", "pdf_pages": [3], "content_type": "body"},
+            {"section_path": ["2 Results"], "parent_id": "parent-table-unread", "pdf_pages": [4],
+             "content_type": "table", "source_spans": [{"pdf_page": 4}],
+             "text": "Table 5: Directory-only table\n<tr><td>HIDDEN TABLE ROW</td></tr>"},
+            {"section_path": ["2 Results"], "parent_id": "parent-image", "pdf_pages": [5],
+             "content_type": "image", "source_spans": [{"pdf_page": 5}], "text": "Figure 1: Hidden image"}])
         papers = [{"paper_id": "p1", "parse_revision": "r1", "title": "Paper A",
-            "_chunk_order": ["early", "late"], "reading_directory": [
-                {"section_path": ["1 Methods"], "parent_id": "parent-early", "pdf_pages": [2]},
-                {"section_path": [], "parent_id": "parent-missing-name", "pdf_pages": [3]}]}]
+            "_chunk_order": ["early", "late", "table-row"],
+            "reading_directory": reading_directory(directory_store, [("p1", "r1")])[("p1", "r1")]}]
         shown = json.loads(build_agent_messages(question, structured, phase="autonomous_decision",
             loop_state={"remaining_steps": 5}, paper_information=papers)[1]["content"])
-        self.assertEqual([g["section_path"] for g in shown["evidence_sections"]], [["1 Methods"], ["2 Results"]])
-        self.assertEqual([g["chunks"][0]["rank"] for g in shown["evidence_sections"]], [2, 1])
-        self.assertEqual(shown["selected_papers"][0]["reading_directory"][1]["section_path"], [])
-        self.assertEqual(shown["allowed_citation_ids"], ["late", "early"])
+        self.assertEqual([g["section_path"] for g in shown["evidence_sections"]],
+                         [["1 Methods"], ["2 Results"], ["3 Tables"]])
+        self.assertEqual([g["chunks"][0]["rank"] for g in shown["evidence_sections"]], [2, 1, 3])
+        directory = shown["selected_papers"][0]["reading_directory"]
+        self.assertEqual([entry["content_type"] for entry in directory], ["body", "body", "table"])
+        self.assertEqual(directory[1]["section_path"], [])
+        table_entry = directory[2]
+        self.assertEqual(table_entry["parent_id"], "parent-table-unread")
+        self.assertEqual(table_entry["caption"], "Table 5: Directory-only table")
+        self.assertEqual(table_entry["pdf_pages"], [4])
+        self.assertEqual(table_entry["section_path"], ["2 Results"])
+        self.assertEqual(shown["evidence_sections"][2]["chunks"][0]["shown_text"], table_original["text"])
+        self.assertEqual(encoded(shown).count("Table 4: Read table"), 1)
+        self.assertNotIn("HIDDEN TABLE ROW", encoded(shown))
+        self.assertNotIn("parent-image", encoded(shown))
+        self.assertEqual(shown["allowed_citation_ids"], ["late", "early", "table-row"])
         self.assertNotIn("parent-early", shown["allowed_citation_ids"])
+        self.assertNotIn("parent-table-unread", shown["allowed_citation_ids"])
         self.assertEqual(encoded(shown).count("Original earlier section"), 1)
         from paper_assistant.context import _token_counter
         self.assertLessEqual(_token_counter()(encoded({k:shown[k] for k in
@@ -469,9 +499,10 @@ class ContextChecks(unittest.TestCase):
         self.assertNotIn("Earlier background observation", encoded(final_messages))
 
         formula_text = ("Selection uses the rule every = all = each ≤ most when a relation "
-                        "is hard-coded. A parallel alternative requires both the source and "
-                        "the filtering condition.")
-        condition_text = "The parallel condition holds only when the held-out source is available."
+                        "is hard-coded. The rule applies only if both the source and the "
+                        "filtering condition")
+        condition_text = ("hold; otherwise the relation is not added. This filtering rule is "
+                          "described for the current implementation.")
         omitted_text = "An unshown candidate whose body must not reach the final request."
         formula_context = context_of(
             [evidence("formula", text=formula_text, rank=1),
@@ -492,9 +523,22 @@ class ContextChecks(unittest.TestCase):
             "facts": [{"claim": "The paper states every = all = each ≤ most.",
                        "basis": "paper_evidence", "citation_ids": ["formula"],
                        "evidence_quotes": [{"chunk_id": "formula",
-                           "quote": "when a relation is hard-coded"}]}]}
+                           "quote": "when a relation is hard-coded"}]},
+                      {"claim": ("The rule applies only if both the source and the filtering "
+                                 "condition hold; otherwise the relation is not added."),
+                       "basis": "paper_evidence", "citation_ids": ["formula", "condition"],
+                       "evidence_quotes": [
+                           {"chunk_id": "formula",
+                            "quote": "The rule applies only if both the source and the filtering condition"},
+                           {"chunk_id": "condition",
+                            "quote": "hold; otherwise the relation is not added."}]}]}
         self.assertIn("every = all = each ≤ most", formula_preparation["facts"][0]["claim"])
         self.assertNotIn("every = all = each", formula_preparation["facts"][0]["evidence_quotes"][0]["quote"])
+        self.assertEqual(formula_preparation["facts"][1]["citation_ids"], ["formula", "condition"])
+        self.assertEqual([quote["chunk_id"] for quote in formula_preparation["facts"][1]["evidence_quotes"]],
+                         ["formula", "condition"])
+        self.assertIn(formula_preparation["facts"][1]["evidence_quotes"][0]["quote"], formula_text)
+        self.assertIn(formula_preparation["facts"][1]["evidence_quotes"][1]["quote"], condition_text)
         formula_conversation = {"user_question": scope_question, "standalone_question": scope_question,
             "history": [], "answer_instructions": NORMAL_ANSWER_INSTRUCTION}
         fixed_formula_prep = build_fixed_prepare_messages(
@@ -514,6 +558,13 @@ class ContextChecks(unittest.TestCase):
                 prepared_messages=autonomous_formula_prep,
                 prepared_response=encoded(formula_preparation),
                 conversation_context=formula_conversation), autonomous_formula_prep)]
+        self.assertIn("separate continuous quote", " ".join(fixed_formula_prep[0]["content"].split()))
+        self.assertIn("separate continuous quote", " ".join(autonomous_formula_prep[0]["content"].split()))
+        for prep in (fixed_formula_prep, autonomous_formula_prep):
+            normalized_prep = " ".join(prep[0]["content"].split())
+            self.assertIn("technical meaning in each fact and in missing_information", normalized_prep)
+        self.assertNotIn("one-hot", fixed_formula_prep[0]["content"].lower())
+        self.assertNotIn("one-hot", autonomous_formula_prep[0]["content"].lower())
         for formula_final, formula_prep in formula_finals:
             serialized = encoded(formula_final)
             formula_payload = json.loads(formula_final[-1]["content"])
@@ -528,11 +579,22 @@ class ContextChecks(unittest.TestCase):
             self.assertEqual(formula_payload["missing_information"],
                              "The relation symbol remains locally uncertain.")
             self.assertIn("every = all = each ≤ most", serialized)
+            self.assertEqual(encoded(formula_final[1]).count(formula_text), 1)
+            self.assertEqual(encoded(formula_final[1]).count(condition_text), 1)
             self.assertEqual(serialized.count(formula_text), 1)
             self.assertEqual(serialized.count(condition_text), 1)
             self.assertNotIn(omitted_text, serialized)
             self.assertNotIn("omitted", formula_payload["allowed_citation_ids"])
             self.assertIn("the originals govern", formula_final[0]["content"])
+            prepared_response = json.loads(formula_final[-2]["content"])
+            self.assertEqual(prepared_response["facts"][1]["citation_ids"], ["formula", "condition"])
+            self.assertEqual([quote["chunk_id"] for quote in prepared_response["facts"][1]["evidence_quotes"]],
+                             ["formula", "condition"])
+            final_system = " ".join(formula_final[0]["content"].lower().split())
+            self.assertIn("more specific technical category", final_system)
+            self.assertIn("whole merged claim", final_system)
+            self.assertIn("prepared citations are not audited conclusions", final_system)
+            self.assertNotIn("one-hot", final_system)
         self.assertIn(NORMAL_ANSWER_INSTRUCTION,
                       json.loads(formula_finals[0][0][-1]["content"])["conversation_context"]["answer_instructions"])
         self.assertNotIn("direct_answer", json.loads(formula_finals[0][0][-1]["content"])
@@ -544,6 +606,78 @@ class ContextChecks(unittest.TestCase):
         self.assertNotIn("prepare_answer", gap_data["action_contracts"])
         self.assertNotIn("answer", gap_data["action_contracts"])
         self.assertEqual(gap_data["executed_actions"][0]["parsed_action"]["facts"], prepared["facts"])
+
+        # D2: the complete request budget replaces the old fixed evidence caps.
+        from paper_assistant.agent_prompt import build_agent_messages
+        from paper_assistant.message_fit import (context_fit_budget, count_request_tokens,
+                                                 effective_context_length)
+        self.assertEqual(effective_context_length(None), 8192)
+        self.assertEqual(context_fit_budget(1048576, 4096),
+                         min(1048576 * 97 // 100, 1048576 - 4096))
+        self.assertEqual(context_fit_budget(None, 4096), 4096)
+        ten_rows = [evidence("ten-" + str(index), text="Retained original " + str(index) + ".",
+                             rank=index + 1) for index in range(10)]
+        ten_context = select_context(ten_rows, [("p1", "r1")], max_chars=None)
+        ten_context["question"] = question
+        self.assertEqual(len(ten_context["shown_evidence"]), 10)
+        first_payload = json.loads(build_agent_messages(
+            question, ten_context, phase="autonomous_decision",
+            loop_state={"remaining_steps": 5},
+            new_evidence_ids=[row["chunk_id"] for row in ten_rows[:5]])[1]["content"])
+        second_payload = json.loads(build_agent_messages(
+            question, ten_context, phase="autonomous_decision",
+            loop_state={"remaining_steps": 4},
+            new_evidence_ids=[row["chunk_id"] for row in ten_rows[5:]])[1]["content"])
+        self.assertEqual(len(first_payload["evidence_sections"][0]["chunks"]), 5)
+        self.assertEqual(len(second_payload["evidence_sections"][0]["chunks"]), 5)
+        self.assertEqual(second_payload["allowed_citation_ids"],
+                         [row["chunk_id"] for row in ten_rows])
+        self.assertNotIn("Retained original 0.", encoded(second_payload))
+        request_count = count_request_tokens(
+            [{"role": "system", "content": "system"}, {"role": "user", "content": encoded(second_payload)}],
+            [{"type": "function", "function": {"name": "search"}}])
+        self.assertGreater(request_count, 0)
+        self.assertLess(request_count, context_fit_budget(1048576, 4096))
+
+        # Force an over-capacity request and verify whole-chunk trimming and
+        # citation-ID synchronization, not just the budget formula.
+        from paper_assistant.agent import fit_agent_request
+        from paper_assistant.agent_actions import search_tool_definition, read_context_tool_definition
+        capacity_rows = [evidence(
+            "capacity-" + str(index),
+            text="capacity-" + str(index) + " " + "Chinese adaptation detail. " * 80,
+            rank=index + 1) for index in range(10)]
+        capacity_context = select_context(capacity_rows, [("p1", "r1")], max_chars=None)
+        capacity_context["question"] = question
+        capacity_messages = build_agent_messages(
+            question, capacity_context, phase="autonomous_decision",
+            loop_state={"remaining_steps": 5},
+            new_evidence_ids=[row["chunk_id"] for row in capacity_rows])
+        capacity_budget = context_fit_budget(8192, 1024)
+        fitted_messages, trimmed_ids = fit_agent_request(
+            capacity_context, capacity_messages, context_length=8192, max_tokens=1024,
+            native_search=True)
+        self.assertTrue(trimmed_ids)
+        self.assertLessEqual(count_request_tokens(
+            fitted_messages, [search_tool_definition(), read_context_tool_definition()]),
+            capacity_budget)
+        self.assertEqual(capacity_context["allowed_citation_ids"],
+                         [row["chunk_id"] for row in capacity_context["shown_evidence"]])
+        self.assertEqual(capacity_context["candidate_count"],
+                         len(capacity_context["shown_evidence"]) + len(capacity_context["omitted_evidence"]))
+        self.assertEqual(set(trimmed_ids),
+                         {row["chunk_id"] for row in capacity_context["omitted_evidence"]
+                          if row["reason"] == "token_budget"})
+        for message in fitted_messages:
+            if message.get("role") != "user":
+                continue
+            payload = json.loads(message["content"])
+            if "allowed_citation_ids" in payload:
+                self.assertEqual(payload["allowed_citation_ids"],
+                                 capacity_context["allowed_citation_ids"])
+        for identifier in trimmed_ids:
+            dropped = next(row for row in capacity_rows if row["chunk_id"] == identifier)
+            self.assertNotIn(encoded(dropped["text"]), encoded(fitted_messages))
 
     def test_build_messages_rejects_tampered_allowlist_ranges_hash_budget_or_identity(self):
         original = context_of()

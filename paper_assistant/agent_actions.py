@@ -14,7 +14,7 @@ from paper_assistant.schemas import AnswerDraft, Claim
 
 
 ACTION_SCHEMA_VERSION = "d12-agent-actions-v1"
-AUTONOMOUS_ACTION_SCHEMA_VERSION = "v2.15-gap-driven-evidence-actions-v1"
+AUTONOMOUS_ACTION_SCHEMA_VERSION = "v3-native-evidence-tools-v1"
 MISSING_INFORMATION_MAX_CHARS = 500
 RETRY_QUERY_MAX_CHARS = 1000
 REASON_MAX_CHARS = 1000
@@ -196,8 +196,9 @@ def parse_agent_action(content: str, *, phase: str, has_shown_evidence: bool,
         parsed = _ACTION_ADAPTER.validate_python(value, strict=True)
     except ValidationError as error:
         raise ActionParseError("invalid_action_schema", field_issues=_action_field_issues(error)) from None
-    except (ValueError, RecursionError):
-        raise ActionParseError("invalid_action_schema") from None
+    except (ValueError, RecursionError) as error:
+        code = str(error) if str(error) in ("citation_unknown_ref", "citation_not_shown") else "invalid_action_schema"
+        raise ActionParseError(code) from None
     if parsed.action not in permitted:
         raise ActionParseError("action_not_allowed")
     if prepare_answer and isinstance(parsed, AnswerAction) and any(
@@ -287,3 +288,26 @@ def parse_read_context_call(call):
         return ReadContextAction.model_validate(_decode_action_json(call["function"]["arguments"]), strict=True)
     except ValidationError:
         raise ActionParseError("invalid_action_schema") from None
+
+
+class RunJavaScriptAction(_StrictAction):
+    code: str = Field(min_length=1)
+
+
+def run_javascript_tool_definition():
+    return {"type": "function", "function": {"name": "run_javascript",
+        "description": "Run one JavaScript snippet over values you already have, writing the result with console.log. Use it only for arithmetic, differences, ratios, sorting, counting or aggregation. The code must derive its output from supplied values; do not print a known conclusion or use it as search. No files, network, database, environment, Python objects or Node modules. Each call is independent; stdout is limited to 1 MiB and execution to 5 seconds.",
+        "parameters": {"type": "object", "additionalProperties": False,
+                       "properties": {"code": {"type": "string", "minLength": 1}},
+                       "required": ["code"]}}}
+
+
+def parse_run_javascript_call(call):
+    if call["function"]["name"] != "run_javascript":
+        raise ActionParseError("unknown_tool")
+    try:
+        action = RunJavaScriptAction.model_validate(
+            _decode_action_json(call["function"]["arguments"]), strict=True)
+    except ValidationError:
+        raise ActionParseError("invalid_action_schema") from None
+    return action

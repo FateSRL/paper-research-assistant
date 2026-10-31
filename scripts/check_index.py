@@ -19,9 +19,10 @@ from uuid import UUID, uuid4
 
 from qdrant_client import models
 
-from paper_assistant.config import EmbeddingSettings
+from paper_assistant.config import EmbeddingSettings, MinerUAPISettings
 from paper_assistant.embedding_client import EmbeddingAPIError, EmbeddingBatch
 from paper_assistant.indexing import EmbeddingCache, IndexBuilder, IndexingError, digest, make_index_profile
+from paper_assistant.mineru_api import MinerUAPIError
 from paper_assistant.retrieval import QdrantStore, VectorStoreError, point_id
 from paper_assistant.storage import PaperStore, StorageError
 from scripts.check_storage import storage_fixture
@@ -359,7 +360,55 @@ class IndexChecks(unittest.TestCase):
         fake = FakeEmbedding()
         events = []
         clients, request_clients = [], []
+        api_calls = []
         actual_client = httpx.Client
+
+        from paper_assistant import structured_ingest
+        api_pages = []
+        for index in range(12):
+            blocks = []
+            if index == 0:
+                blocks.append({"type": "paragraph_title", "level": 2, "bbox": [0.1, 0.1, 0.4, 0.15],
+                               "content": [{"type": "text", "content": "Abstract"}]})
+                blocks.append({"type": "text", "bbox": [0.1, 0.2, 0.9, 0.4],
+                               "content": [{"type": "text", "content":
+                               "A local PDF preserves its evidence and import identity."}]})
+            else:
+                if index == 1:
+                    blocks.append({"type": "paragraph_title", "level": 2, "bbox": [0.1, 0.1, 0.4, 0.15],
+                                   "content": [{"type": "text", "content": "1 Introduction"}]})
+                blocks.append({"type": "text", "bbox": [0.1, 0.2, 0.9, 0.4],
+                               "content": [{"type": "text", "content":
+                               "Independent body passage " + str(index)
+                               + " describes a separate local research observation."}]})
+            api_pages.append({"page_idx": index, "blocks": blocks})
+        api_parsed = {
+            "schema": "docvortex.middle", "schema_version": "2.0",
+            "extensions": {"docvortex_layout": {"pages": [
+                {"page_idx": index, "width_pt": 600, "height_pt": 800}
+                for index in range(12)]}},
+            "pages": api_pages,
+        }
+
+        def api_saved_parse(pdf_path, output_dir, *, project_root, api_layout=None):
+            self.assertEqual(project_root, upload_root)
+            self.assertTrue(Path(api_layout).is_file())
+            output_dir.mkdir(parents=True, exist_ok=True)
+            (output_dir / "middle_json.json").write_text(json.dumps(api_parsed), encoding="utf-8")
+            return deepcopy(api_parsed)
+
+        def mock_api(pdf_path, output_dir, settings, **kwargs):
+            api_calls.append((Path(pdf_path).name, Path(output_dir)))
+            output_dir.mkdir(parents=True)
+            (output_dir / "full.md").write_text("offline API full text", encoding="utf-8")
+            (output_dir / "layout.json").write_text(json.dumps({
+                "_backend": "hybrid", "_effort": "medium", "_ocr_enable": True,
+                "_version_name": "offline-api", "pdf_info": [
+                    {"page_idx": index, "page_size": [600, 800]} for index in range(12)]}),
+                encoding="utf-8")
+            return {"batch_id": "offline-api-batch", "output_dir": str(output_dir),
+                    "markdown_files": [str(output_dir / "full.md")],
+                    "json_files": [str(output_dir / "layout.json")], "elapsed_seconds": 0.0}
 
         def unexpected_http(request):
             self.fail("离线假 embedding 不应发送 HTTP 请求")
@@ -383,11 +432,25 @@ class IndexChecks(unittest.TestCase):
         with mock.patch.object(import_runtime, "load_current_profile", return_value=self.profile), \
                 mock.patch.object(import_runtime, "load_embedding_settings", return_value=self.settings), \
                 mock.patch.object(import_runtime, "embed_texts", side_effect=fail_once), \
-                mock.patch.object(import_runtime.httpx, "Client", side_effect=create_client):
+                mock.patch.object(import_runtime, "load_mineru_api_settings",
+                                  return_value=MinerUAPISettings("offline-token")), \
+                mock.patch.object(import_runtime, "parse_pdf_via_api", side_effect=mock_api), \
+                mock.patch.object(import_runtime.httpx, "Client", side_effect=create_client), \
+                mock.patch.object(structured_ingest, "parse_structured_pdf", side_effect=api_saved_parse), \
+                mock.patch.object(structured_ingest, "load_token_counter", return_value=lambda text: len(text.split())):
+            with mock.patch.object(import_runtime, "parse_pdf_via_api",
+                                   side_effect=MinerUAPIError("离线模拟 API 失败")):
+                failed_api = import_runtime.import_pdf(
+                    pdf_bytes, "API failure.pdf", project_root=upload_root)
+            self.assertEqual(failed_api["status"], "failed")
+            self.assertEqual(failed_api["stage"], "parse")
+            self.assertEqual(failed_api["embedding_requests"], 0)
+            self.assertIsNone(failed_api["parse_revision"])
+            self.assertFalse(any(path.is_dir() for path in (upload_root / "data/mineru_api").glob("*")))
             failed = import_runtime.import_pdf(pdf_bytes, "Local paper.pdf", project_root=upload_root,
-                                               on_progress=events.append, parser="legacy")
+                                               on_progress=events.append)
             self.assertEqual(failed["status"], "failed", failed)
-            self.assertEqual(failed["stage"], "index")
+            self.assertEqual(failed["stage"], "index", failed)
             self.assertGreater(failed["chunk_count"], 10)
             self.assertLessEqual(failed["chunk_count"], 20)
             self.assertEqual(failed["embedding_requests"], 2)
@@ -418,9 +481,8 @@ class IndexChecks(unittest.TestCase):
 
             with mock.patch.object(import_runtime, "parse_pdf_pages", side_effect=AssertionError("重复上传不重解析")):
                 ready = import_runtime.import_pdf(pdf_bytes, "Renamed paper.pdf", title="Changed title",
-                                                  project_root=upload_root, on_progress=events.append, parser="legacy")
-                repeated = import_runtime.import_pdf(pdf_bytes, "Renamed again.pdf", project_root=upload_root,
-                                                     parser="legacy")
+                                                  project_root=upload_root, on_progress=events.append)
+                repeated = import_runtime.import_pdf(pdf_bytes, "Renamed again.pdf", project_root=upload_root)
             self.assertEqual(ready["status"], "ready", ready)
             self.assertEqual(repeated["status"], "ready", repeated)
             self.assertEqual(ready["paper_id"], failed["paper_id"])
@@ -440,6 +502,8 @@ class IndexChecks(unittest.TestCase):
             self.assertEqual(repeated["upserted_count"], 0)
             self.assertTrue(repeated["reused_ready"])
             self.assertEqual(repeated["request_statistics"]["request_elapsed_seconds"], 0)
+            self.assertEqual(len(api_calls), 1)
+            self.assertEqual(ready["parser"]["name"], "mineru-api")
             self.assertEqual(len(fake.calls), 2)
             self.assertEqual(len(clients), 3)
             self.assertIs(request_clients[2], clients[1])
@@ -513,9 +577,11 @@ class IndexChecks(unittest.TestCase):
             # A prior Advanced version must not supply the new Standard parse or ready state.
             advanced_parser = {**structured_ingest.PARSER, "tier": "advanced", "image_analysis": True}
             with mock.patch.object(structured_ingest, "PARSER", advanced_parser):
-                advanced = import_runtime.import_pdf(pdf_bytes, "Prior Advanced.pdf", project_root=upload_root)
+                advanced = import_runtime.import_pdf(pdf_bytes, "Prior Advanced.pdf", project_root=upload_root,
+                                                     parser="mineru-standard")
             self.assertEqual(advanced["status"], "ready", advanced)
-            structured = import_runtime.import_pdf(pdf_bytes, "Same PDF.pdf", project_root=upload_root)
+            structured = import_runtime.import_pdf(pdf_bytes, "Same PDF.pdf", project_root=upload_root,
+                                                   parser="mineru-standard")
             self.assertEqual(structured["status"], "ready", structured)
             self.assertEqual(structured["paper_id"], ready["paper_id"])
             self.assertNotEqual(structured["parse_revision"], ready["parse_revision"])

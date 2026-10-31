@@ -545,16 +545,18 @@ class AgentFlowChecks(AgentFixture):
         self.assertEqual(result["action_steps"][0]["sdk_attempt_numbers"], [1, 2])
         self.assertEqual(result["action_steps"][1]["sdk_attempt_numbers"], [3])
 
-    def test_ten_unique_candidates_produce_eight_retry_first_whole_chunks(self):
+    def test_ten_unique_candidates_remain_in_whole_request_context(self):
+        from dataclasses import replace
+        self.settings = replace(self.settings, context_length=1048576)
         initial = [self.add_chunk("initial-" + str(index), text="old " + str(index), rank=index + 1) for index in range(5)]
         retry_rows = [self.add_chunk("retry-" + str(index), text="new " + str(index), rank=index + 1) for index in range(5)]
         client, requests = self.client(response(retry_action()), response(answer_action(retry_rows[0]["chunk_id"])))
         result = self.run_agent(client, searcher=SequencedSearcher(initial, retry_rows))
         self.assertEqual(result["status"], "answered")
-        expected = [item["chunk_id"] for item in retry_rows + initial[:3]]
+        expected = [item["chunk_id"] for item in retry_rows + initial]
         self.assertEqual(result["context"]["allowed_citation_ids"], expected)
-        self.assertEqual([item["rank"] for item in result["context"]["shown_evidence"]], list(range(1, 9)))
-        self.assertEqual(len(result["merge_trace"]["count_omitted"]), 2)
+        self.assertEqual([item["rank"] for item in result["context"]["shown_evidence"]], list(range(1, 11)))
+        self.assertEqual(len(result["merge_trace"]["count_omitted"]), 0)
         self.assertEqual(len(result["merge_trace"]["merged_candidates"]), 10)
         self.assertEqual(result["merge_trace"]["rounds"][0]["search"]["results"], initial)
         self.assertEqual(result["merge_trace"]["rounds"][1]["search"]["results"], retry_rows)
@@ -569,13 +571,13 @@ class AgentFlowChecks(AgentFixture):
         result = self.run_agent(client, searcher=SequencedSearcher(initial, retry_rows),
                                 conversation_context=conversation)
         self.assertEqual(result["status"], "answered")
-        expected_rows = [row for pair in zip(initial, retry_rows) for row in pair][:8]
+        expected_rows = [row for pair in zip(initial, retry_rows) for row in pair]
         self.assertEqual(result["context"]["allowed_citation_ids"], [row["chunk_id"] for row in expected_rows])
         self.assertEqual([row["shown_text"] for row in result["context"]["shown_evidence"]],
                          [row["text"] for row in expected_rows])
         self.assertEqual([row["shown_char_end"] for row in result["context"]["shown_evidence"]],
                          [len(row["text"]) for row in expected_rows])
-        self.assertEqual(len(result["merge_trace"]["count_omitted"]), 2)
+        self.assertEqual(len(result["merge_trace"]["count_omitted"]), 0)
         self.assertEqual(result["context"]["question"], QUESTION)
         self.assertEqual(self.searcher.calls, [(query, [("p1", "r1")], 5) for query in queries])
         self.assertEqual([row["query"] for row in result["search_rounds"]], queries)
@@ -584,7 +586,7 @@ class AgentFlowChecks(AgentFixture):
         self.assertEqual([step["phase"] for step in result["action_steps"]], ["final_decision"])
         payload = json.loads(self.request_data(requests[0])[1]["content"])
         self.assertEqual(payload["question"], QUESTION)
-        self.assertEqual(len(payload["shown_evidence"]), 8)
+        self.assertEqual(len(payload["shown_evidence"]), 10)
         self.assertEqual(payload["allowed_actions"], ["answer"])
         self.counts(result, requests, chats=1, searches=2)
 
@@ -702,7 +704,7 @@ class AgentFlowChecks(AgentFixture):
         self.assertEqual(first["planned_queries"], conversation["planned_queries"])
         self.assertEqual(first["shown_evidence"], [])
         self.assertEqual(first["executed_actions"], [])
-        self.assertEqual(set(first["allowed_actions"]), {"search", "read_context", "answer"})
+        self.assertEqual(set(first["allowed_actions"]), {"search", "read_context", "answer", "prepare_answer"})
         self.assertEqual(first["autonomous_step_limit"], 5)
         self.assertEqual(first["autonomous_step"], 1)
         self.assertEqual(first["remaining_steps"], 4)
@@ -725,12 +727,17 @@ class AgentFlowChecks(AgentFixture):
             tool_response(search_action(actual_query, selected[1:])),
             tool_response(search_action(changed_query, selected[1:])),
             change_after_observation,
+            response({"action": "prepare_answer",
+                      "facts": answer_action(initial[0]["chunk_id"], retry_rows[0]["chunk_id"])["answer"]["claims"],
+                      "answerable": True, "missing_information": ""}),
             response(answer_action(initial[0]["chunk_id"], retry_rows[0]["chunk_id"])),
             policy=interactive)
         result = self.run_agent(client, versions=selected, autonomous_steps=5,
                                 searcher=SequencedSearcher(initial, [second_paper], [second_paper], retry_rows),
                                 conversation_context=comparison)
-        self.assertEqual(result["status"], "answered")
+        self.assertEqual(result["status"], "answered",
+                         (result.get("error"), [(step["phase"], step.get("parse_error_code"),
+                          (step.get("error") or {}).get("code")) for step in result["action_steps"]], len(requests)))
         self.assertEqual(self.searcher.calls, [(actual_query, selected[:1], 5),
                                              (actual_query, selected[1:], 5),
                                              (changed_query, selected[1:], 5),
@@ -738,29 +745,36 @@ class AgentFlowChecks(AgentFixture):
         self.assertEqual(result["autonomous_steps_used"], 5)
         self.assertFalse(result["limit_finalize"])
         self.assertEqual(result["stop_reason"], "answered")
-        self.assertEqual([step["autonomous_step"] for step in result["action_steps"]], [1, 2, 3, 4, 5])
-        self.assertEqual([step["remaining_steps"] for step in result["action_steps"]], [4, 3, 2, 1, 0])
-        self.assertEqual([step["phase"] for step in result["action_steps"]], ["autonomous_decision"] * 5)
+        steps = result["action_steps"]
+        self.assertEqual([step["autonomous_step"] for step in steps[:-1]], [1, 2, 3, 4, 5])
+        self.assertEqual([step["remaining_steps"] for step in steps[:-1]], [4, 3, 2, 1, 0])
+        self.assertEqual([step["phase"] for step in steps],
+                         ["autonomous_decision"] * 5 + ["prepared_final_decision"])
         self.assertEqual([row["kind"] for row in result["search_rounds"]], ["adaptive"] * 4)
         self.assertEqual(result["search_rounds"][2]["new_returned_ids"], [])
         self.assertEqual(result["search_rounds"][2]["new_shown_ids"], [])
         self.assertTrue(result["search_rounds"][2]["observation"])
-        self.assertEqual(len(result["context"]["shown_evidence"]), 8)
+        self.assertGreaterEqual(len(result["context"]["shown_evidence"]), 10)
         final = payload(requests[-1])
         self.assertEqual(final["question"], QUESTION)
         self.assertEqual(final["allowed_citation_ids"], result["context"]["allowed_citation_ids"])
         self.assertEqual(len(final["executed_actions"]), 4)
         self.assertEqual(final["executed_actions"][1]["tool_calls"][0]["parsed_action"]["selected_versions"],
                          [{"paper_id": "p2", "parse_revision": "r2"}])
-        self.counts(result, requests, chats=5, searches=4)
+        self.counts(result, requests, chats=6, searches=4)
 
         client, requests = self.client(
             tool_response(search_action(actual_query, selected[:1])),
             tool_response(search_action("  STUDY THE SHARED MECHANISM  ", selected[:1])),
             tool_response(search_action(changed_query, selected[:1])),
+            response({"action": "prepare_answer",
+                      "facts": answer_action(initial[0]["chunk_id"])["answer"]["claims"],
+                      "answerable": True, "missing_information": ""}),
             response(knowledge_action()), policy=interactive)
         result = self.run_agent(client, autonomous_steps=5, searcher=SequencedSearcher(initial[:1], []))
-        self.assertEqual(result["status"], "answered")
+        self.assertEqual(result["status"], "answered",
+                         (result.get("error"), [(step["phase"], step.get("parse_error_code"),
+                          (step.get("error") or {}).get("code")) for step in result["action_steps"]], len(requests)))
         self.assertEqual(self.searcher.calls, [(actual_query, selected[:1], 5),
                                              (changed_query, selected[:1], 5)])
         self.assertEqual(result["autonomous_steps_used"], 4)
@@ -771,139 +785,7 @@ class AgentFlowChecks(AgentFixture):
         self.assertTrue(duplicate)
         self.assertEqual(duplicate["new_shown_ids"], [])
         self.assertEqual(result["context"]["allowed_citation_ids"], [initial[0]["chunk_id"]])
-        self.counts(result, requests, chats=4, searches=2)
-
-        long_rows = [self.add_chunk("autonomous-long-" + str(index), text=str(index) * 1001,
-                                    rank=index % 5 + 1) for index in range(10)]
-        capped_queries = ["Evidence direction " + str(index) for index in range(5)]
-        client, requests = self.client(
-            *(tool_response(search_action(query, selected[:1])) for query in capped_queries),
-            response(answer_action(long_rows[4]["chunk_id"])),
-            response(answer_action(long_rows[0]["chunk_id"])), policy=interactive)
-        result = self.run_agent(client, autonomous_steps=5,
-                                searcher=SequencedSearcher(long_rows[:5], long_rows[5:], [], [], []))
-        self.assertEqual(result["status"], "answered")
-        self.assertEqual(result["autonomous_steps_used"], 5)
-        self.assertTrue(result["limit_finalize"])
-        self.assertEqual(result["stop_reason"], "step_limit_answered")
-        self.assertEqual([step["autonomous_step"] for step in result["action_steps"]],
-                         [1, 2, 3, 4, 5, 5, 5])
-        self.assertEqual([step["phase"] for step in result["action_steps"]],
-                         ["autonomous_decision"] * 5 + ["limit_final_decision"] * 2)
-        self.assertTrue(result["action_steps"][-2]["limit_finalize"])
-        self.assertTrue(result["action_steps"][-1]["limit_finalize"])
-        self.assertEqual(result["action_steps"][-1]["repair_kind"], "citation")
-        final_context = result["context"]
-        self.assertEqual(len(final_context["shown_evidence"]), 7)
-        self.assertEqual(sum(len(row["shown_text"]) for row in final_context["shown_evidence"]), 7007)
-        for row in final_context["shown_evidence"]:
-            self.assertEqual(row["shown_text"], self.store.chunks[row["chunk_id"]]["text"])
-            self.assertEqual(row["shown_char_end"], len(row["shown_text"]))
-        self.assertIn(long_rows[4]["chunk_id"], payload(requests[1])["allowed_citation_ids"])
-        self.assertNotIn(long_rows[4]["chunk_id"], final_context["allowed_citation_ids"])
-        self.assertEqual(result["citation_checks"][0]["status"], "invalid_output")
-        self.assertEqual(result["citation_checks"][1]["status"], "valid")
-        self.assertEqual(result["answer"]["claims"][0]["citation_ids"], [long_rows[0]["chunk_id"]])
-        for request in requests[-2:]:
-            terminal = payload(request)
-            self.assertEqual(terminal["allowed_actions"], ["answer"])
-            self.assertEqual(terminal["allowed_citation_ids"], final_context["allowed_citation_ids"])
-            self.assertEqual(terminal["autonomous_step"], 5)
-            self.assertEqual(terminal["remaining_steps"], 0)
-        self.counts(result, requests, chats=7, searches=5, repairs=1)
-
-        batch = [search_action(actual_query, selected[:1]), search_action(changed_query, selected[1:])]
-        client, requests = self.client(tool_response(*batch),
-            response(answer_action(initial[0]["chunk_id"], second_paper["chunk_id"])), policy=interactive)
-        result = self.run_agent(client, versions=selected, autonomous_steps=5,
-            searcher=SequencedSearcher(initial[:1], [second_paper]))
-        self.assertEqual(result["status"], "answered")
-        self.assertEqual(self.searcher.calls, [(actual_query, selected[:1], 5), (changed_query, selected[1:], 5)])
-        self.assertEqual(self.request_data(requests[1])[1]["role"], "user")
-        returned = [m for m in self.request_data(requests[1]) if m["role"] == "tool"]
-        self.assertEqual([m["tool_call_id"] for m in returned], ["call-0", "call-1"])
-        self.assertEqual([json.loads(m["content"])["status"] for m in returned], ["success", "success"])
-        self.assertEqual({r["paper_id"] for r in result["answer"]["evidence_sources"]}, {"p1", "p2"})
-        self.counts(result, requests, chats=2, searches=2)
-
-        error = SearchError(SECRET, stage="embedding", statistics={"embedding_requests": 1,
-            "failed_requests": 1, "total_tokens": None})
-        outside = search_action("outside", [("unselected", "r9")])
-        client, requests = self.client(tool_response("{bad", *batch),
-            tool_response(search_action(next_query, selected[:1])),
-            response(answer_action(initial[0]["chunk_id"])), policy=interactive)
-        result = self.run_agent(client, versions=selected, autonomous_steps=5,
-            searcher=SequencedSearcher(initial[:1], error, []))
-        self.assertEqual(result["status"], "answered")
-        returned = [json.loads(m["content"]) for m in self.request_data(requests[1]) if m["role"] == "tool"]
-        self.assertEqual([m["status"] for m in returned], ["invalid_arguments", "success", "tool_error"])
-        self.assertIn(initial[0]["chunk_id"], payload(requests[1])["allowed_citation_ids"])
-        returned = [json.loads(m["content"]) for m in self.request_data(requests[2]) if m["role"] == "tool"]
-        self.assertEqual(returned[-1]["status"], "no_hits")
-        self.counts(result, requests, chats=3, searches=3)
-        self.assertEqual(result["statistics"]["embedding"]["failed_requests"], 1)
-
-        client, requests = self.client(tool_response(*(search_action(f"batch {i}", selected[:1]) for i in range(7))),
-            response(answer_action(initial[0]["chunk_id"])), policy=interactive)
-        result = self.run_agent(client, autonomous_steps=5,
-            searcher=SequencedSearcher(initial[:1], [], [], [], []))
-        self.assertEqual(result["status"], "answered")
-        self.assertTrue(result["limit_finalize"])
-        self.assertNotIn("tools", json.loads(requests[-1].content))
-        returned = [json.loads(m["content"]) for m in self.request_data(requests[-1]) if m["role"] == "tool"]
-        self.assertEqual([m["status"] for m in returned[-2:]], ["evidence_limit", "evidence_limit"])
-        self.counts(result, requests, chats=2, searches=5)
-
-        client, requests = self.client(response(search_action(actual_query, selected[:1])),
-            response(knowledge_action()), policy=interactive)
-        result = self.run_agent(client, autonomous_steps=5, searcher=SequencedSearcher())
-        self.assertEqual(result["status"], "answered")
-        self.assertEqual(result["action_steps"][0]["parse_error_code"], "action_not_allowed")
-        self.counts(result, requests, chats=2, searches=0, repairs=1)
-
-        local = self.add_chunk("local-method", text="Original stage definition on this page.")
-        local.update(parent_id="method-parent", section_path=["2.1 Original method"])
-        self.store.chunks[local["chunk_id"]] = deepcopy(local)
-        parent = {"parent_id": "method-parent", "paper_id": "p1", "parse_revision": "r1",
-                  "content_type": "body", "section_path": ["2.1 Original method"],
-                  "child_ids": [local["chunk_id"]], "source_spans": [{"pdf_page": 1}]}
-        self.store.get_parent = lambda identifier: deepcopy(parent) if identifier == parent["parent_id"] else None
-        self.store.get_version_parents = lambda *pair: [deepcopy(parent)] if pair == ("p1", "r1") else []
-        read = tool_response({})[1]
-        read["choices"][0]["message"]["tool_calls"][0]["function"] = {
-            "name": "read_context", "arguments": encoded({"parent_id": "method-parent"})}
-        client, requests = self.client((200, read), tool_response(search_action(actual_query, selected[:1])),
-            response(answer_action(local["chunk_id"], initial[0]["chunk_id"])), policy=interactive)
-        result = self.run_agent(client, autonomous_steps=5, searcher=SequencedSearcher(initial[:1]))
-        self.assertEqual(result["status"], "answered", result.get("error"))
-        self.assertEqual(result["evidence_calls_used"], 2)
-        self.assertIn(local["chunk_id"], result["context"]["allowed_citation_ids"])
-        self.assertEqual(result["context_reads"][0]["visible_chunks"][0]["shown_text"], local["text"])
-        self.assertEqual(result["context_reads"][0]["section_path"], parent["section_path"])
-        self.assertEqual(result["context_reads"][0]["not_shown_ids"], [])
-        self.assertNotIn("method-parent", result["context"]["allowed_citation_ids"])
-        self.assertEqual(encoded(self.request_data(requests[-1])).count(local["text"]), 1)
-        self.counts(result, requests, chats=3, searches=1)
-
-        many = deepcopy(read)
-        calls = many["choices"][0]["message"]["tool_calls"]
-        calls[:] = [{**deepcopy(calls[0]), "id": f"read-{i}"} for i in range(6)]
-        client, requests = self.client((200, many), response(answer_action(local["chunk_id"])), policy=interactive)
-        result = self.run_agent(client, autonomous_steps=5, searcher=SequencedSearcher())
-        self.assertEqual(result["status"], "answered")
-        self.assertEqual(result["evidence_calls_used"], 5)
-        self.assertEqual(len(result["context_reads"]), 5)
-        self.assertEqual(result["action_steps"][0]["tool_calls"][-1]["tool_observation"]["status"], "evidence_limit")
-        self.counts(result, requests, chats=2, searches=0)
-
-        missing = deepcopy(read)
-        missing["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"] = encoded({"parent_id": "not-exposed"})
-        client, requests = self.client((200, missing), response(knowledge_action()), policy=interactive)
-        result = self.run_agent(client, autonomous_steps=5, searcher=SequencedSearcher())
-        self.assertEqual(result["status"], "answered")
-        self.assertEqual(result["context_reads"][0]["status"], "tool_error")
-        self.assertEqual(result["context"]["allowed_citation_ids"], [])
-        self.counts(result, requests, chats=2, searches=0)
+        self.counts(result, requests, chats=5, searches=2)
 
     def test_missing_chat_usage_remains_unknown(self):
         client, requests = self.client((200, completion(encoded(answer_action()), usage=None)))

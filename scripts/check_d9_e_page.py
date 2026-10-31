@@ -53,7 +53,7 @@ def source(identifier="offline-c1"):
 
 
 def report(status="answered", mode="fixed_rag", query="Offline question?", submission_id="offline-token",
-           two_claims=False, evidence_text=EVIDENCE):
+           two_claims=False, evidence_text=EVIDENCE, prose_agent=False):
     evidence = source()
     evidence.update(text=evidence_text, shown_text=evidence_text)
     sources = [evidence]
@@ -73,6 +73,19 @@ def report(status="answered", mode="fixed_rag", query="Offline question?", submi
             {"claim": "通用概念补充。", "basis": "model_knowledge", "citation_ids": []},
             {"claim": "不引用原文的问题分析。", "basis": "analysis", "citation_ids": []}])
         answer.update(evidence_status="mixed", reason="论文证据覆盖部分问题，其余内容按依据标注。")
+    if prose_agent and status == "answered":
+        answer = {
+            "text": (CLAIM + " [ID:1]\n\n" + SECOND_CLAIM + " [ID:2]\n\n"
+                     + MERGED_CLAIM + " [ID:2] [ID:1]\n\n通用概念补充。\n\n不引用原文的问题分析。"),
+            "citations": [
+                {"index": 0, "position": 0, "ref": 1, "chunk_id": "offline-c1"},
+                {"index": 1, "position": 0, "ref": 2, "chunk_id": "offline-c2"},
+                {"index": 2, "position": 0, "ref": 2, "chunk_id": "offline-c2"},
+                {"index": 3, "position": 0, "ref": 1, "chunk_id": "offline-c1"},
+            ],
+            "evidence_sources": sources, "evidence_status": "mixed",
+            "reason": "论文证据覆盖部分问题，其余内容按依据标注。",
+        }
     search = {"query": query, "status": "success", "results": [*sources, source("offline-body")],
               "statistics": {"embedding_requests": 1, "total_tokens": 7}}
     qualification = {"requirement": {"required_scope": "abstract", "resolution": "explicit"},
@@ -123,6 +136,7 @@ class PageChecks(unittest.TestCase):
         self.standalone_questions = {}
         self.evidence_text = EVIDENCE
         self.saved_mode = "agent"
+        self.prose_agent = False
 
         def submitted(query, selected_versions, *, mode, project_root, submission_id,
                       conversation_id=None, conversation_history=None, library_mode=False):
@@ -134,7 +148,7 @@ class PageChecks(unittest.TestCase):
             self.assertTrue(submission_id)
             standalone = self.standalone_questions.get(query, query)
             saved = report(self.status, self.saved_mode, standalone, submission_id, two_claims=self.two_claims,
-                           evidence_text=self.evidence_text)
+                           evidence_text=self.evidence_text, prose_agent=self.prose_agent)
             saved.update(conversation_id=conversation_id, conversation_history=deepcopy(conversation_history),
                          user_question=query, standalone_question=standalone)
             if self.status == "needs_clarification":
@@ -194,12 +208,36 @@ class PageChecks(unittest.TestCase):
             "exception_count": len(app.exception)}
 
     def test_two_modes_five_terminal_states_and_full_citations(self):
+        from paper_assistant.prose import normalize_citation_markers, parse_markers
         legacy_report = report
         first_quote, second_quote = EVIDENCE.split("\n")[0], SECOND_EVIDENCE.split("\n")[0]
 
         def quoted_report(*args, **kwargs):
             saved = legacy_report(*args, **kwargs)
-            if saved["status"] == "answered" and saved["mode"] == "agent":
+            if saved["mode"] == "agent" and saved["status"] != "answered":
+                saved["result"]["context"]["shown_evidence"][0]["ref"] = 3
+            if kwargs.get("prose_agent") and saved["status"] == "answered":
+                answer = saved["answer"]
+                raw = (answer["text"].replace("[ID:1]", "[ID: 3]").replace("[ID:2]", "【ID：9】")
+                       + "\n\nBibliography [1] [99].")
+                answer["text"] = normalize_citation_markers(raw)
+                ids = {3: "offline-c1", 9: "offline-c2"}
+                for row in answer["evidence_sources"]:
+                    row["ref"] = 3 if row["chunk_id"] == "offline-c1" else 9
+                for row in saved["result"]["context"]["shown_evidence"]:
+                    row["ref"] = 3 if row["chunk_id"] == "offline-c1" else 9
+                answer["citations"] = [{**marker, "chunk_id": ids[marker["ref"]]}
+                                       for marker in parse_markers(answer["text"])]
+                saved["result"]["answer"] = deepcopy(answer)
+                saved["result"].update(retrieval_strategy="autonomous", loop_version="react-native-tools-v1",
+                    autonomous_steps_used=7, autonomous_step_limit=120, evidence_calls_used=6,
+                    recovery={"kind": "validated_final", "model_requests": 0},
+                    synthesis={"status": "completed"}, action_steps=[
+                        {"autonomous_step": 1, "remaining_steps": 119, "tool_calls": [
+                            {"function": {"name": "search"}}]},
+                        {"autonomous_step": 7, "remaining_steps": 113, "parsed_action": {"action": "final_answer"}}])
+
+            if saved["status"] == "answered" and saved["mode"] == "agent" and "claims" in saved["answer"]:
                 claims = saved["answer"]["claims"]
                 claims[0]["evidence_quotes"] = [{"chunk_id": "offline-c1", "quote": first_quote}]
                 claims[1]["evidence_quotes"] = [{"chunk_id": "offline-c2", "quote": second_quote}]
@@ -228,6 +266,10 @@ class PageChecks(unittest.TestCase):
                                               if item.label == "查看本轮检索到的原文")
                         self.assertFalse(evidence_panel.proto.expanded)
                         self.assertIn(EVIDENCE, self.text(evidence_panel))
+                        if mode == "agent":
+                            original_locations = self.text(evidence_panel) + "\n" + "\n".join(
+                                str(item.label) for item in evidence_panel.get("expander"))
+                            self.assertIn("引用 3 · PDF 文件页序 2", original_locations)
                         details = next(item for item in app.get("expander") if item.label == "回答详情与下载")
                         self.assertIn(status, self.text(details))
                         self.assertEqual(saved["status"], status)
@@ -303,6 +345,63 @@ class PageChecks(unittest.TestCase):
                     if status == "insufficient_evidence":
                         self.assertIn("Offline evidence lacks", text)
                     self.capture(app, mode, status)
+
+        # The current Agent prose record still renders, downloads and enters
+        # history; the loop above keeps the old claim and fixed_rag paths readable.
+        self.saved_mode, self.two_claims, self.prose_agent = "agent", True, True
+        self.status = "answered"
+        app = self.submit(self.app(), "agent")
+        saved = app.session_state["current_report"]
+        text = self.text(app)
+        for paragraph in (CLAIM, SECOND_CLAIM, MERGED_CLAIM, "通用概念补充。", "不引用原文的问题分析。"):
+            self.assertTrue(any(paragraph in value for value in [*(item.value for item in app.markdown), text]))
+        self.assertIn("自主轮数：7 / 120", text)
+        self.assertIn("实际取证调用：6", text)
+        self.assertIn("正文恢复：validated_final", text)
+        self.assertIn("无工具综合：completed", text)
+        self.assertIn("模型动作：search", text)
+        self.assertIn("模型动作：final_answer", text)
+        self.assertIn("引用来源（4 处 / 2 个来源）", text)
+        self.assertIn("Bibliography [1] [99].", text)
+        citation_panel = next(item for item in app.get("popover")
+                              if item.proto.popover.label == "引用来源（4 处 / 2 个来源）")
+        citation_text = self.text(citation_panel)
+        self.assertIn(EVIDENCE, citation_text)
+        self.assertIn(SECOND_EVIDENCE, citation_text)
+        locations = citation_text + "\n" + "\n".join(str(item.label) for item in citation_panel.get("expander"))
+        self.assertIn("引用 3 · PDF 文件页序 2", locations)
+        self.assertIn("引用 9 · PDF 文件页序 3", locations)
+        self.assertEqual(saved["answer"]["citations"][0]["chunk_id"], "offline-c1")
+        self.assertEqual([row["ref"] for row in saved["answer"]["citations"]], [3, 9, 9, 3])
+        self.assertEqual([row["position"] for row in saved["answer"]["citations"]],
+                         [marker["position"] for marker in parse_markers(saved["answer"]["text"])])
+        self.assertEqual(self.download.call_args.args[0]["answer"], saved["answer"])
+        download_json = json.loads(self.download.side_effect(
+            *self.download.call_args.args, **self.download.call_args.kwargs)[0])
+        self.assertEqual(download_json["answer"], saved["answer"])
+        self.assertEqual(len(app.get("download_button")), 2)
+        from paper_assistant.agent_export import render_agent_run
+        from paper_assistant.answer_export import render
+        export_report = deepcopy(saved)
+        for row in export_report["answer"]["evidence_sources"]:
+            row["pdf_absolute_path"] = str(ROOT / "data/papers/offline.pdf")
+        prose_markdown = render_agent_run(export_report)
+        self.assertIn(CLAIM, prose_markdown)
+        self.assertIn(saved["answer"]["text"], prose_markdown)
+        self.assertIn("引用出现序", prose_markdown)
+        self.assertIn("offline-c2", prose_markdown)
+        self.assertIn(CLAIM, render(export_report, project_root=ROOT))
+        from paper_assistant.conversation import select_conversation_history
+        history = select_conversation_history({"one": {"conversation_id": saved["conversation_id"],
+            "report": deepcopy(saved)}}, saved["conversation_id"])
+        self.assertEqual(len(history), 1)
+        self.assertIn(CLAIM, history[0]["text"])
+        self.assertEqual(history[0]["text"], saved["answer"]["text"])
+        self.assertEqual(history[0]["citations"], [{"ref": row["ref"], "chunk_id": row["chunk_id"]}
+                                                for row in saved["answer"]["citations"]])
+        self.assertEqual(history[0]["citation_ids"], ["offline-c1", "offline-c2"])
+        self.prose_agent = False
+        self.two_claims = False
 
     def test_initial_reruns_selection_and_mode_changes_never_run(self):
         app = self.app()

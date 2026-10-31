@@ -39,7 +39,7 @@ def _versions(selected_versions) -> list[tuple[str, str]]:
 def _parameters(top_k, max_chars) -> None:
     if type(top_k) is not int or top_k != 5:
         _fail("invalid_top_k")
-    if type(max_chars) is not int or not 1 <= max_chars <= 8000:
+    if max_chars is not None and (type(max_chars) is not int or not 1 <= max_chars <= 8000):
         _fail("invalid_character_budget")
 
 
@@ -98,7 +98,7 @@ def merge_planned_context(searches, original_question, selected_versions,
     """
     _parameters(5, max_chars)
     pairs = _versions(selected_versions)
-    if type(max_chunks) is not int or not 1 <= max_chunks <= 8:
+    if max_chunks is not None and (type(max_chunks) is not int or not 1 <= max_chunks <= 8):
         _fail("invalid_agent_evidence_count")
     if not isinstance(searches, list):
         _fail("invalid_search_result")
@@ -156,7 +156,7 @@ def merge_planned_context(searches, original_question, selected_versions,
         origins[identifier] = {**origin, "selection_ordinal": ordinal}
         retained.append({**deepcopy(item), "rank": ordinal})
 
-    capped = retained[:max_chunks]
+    capped = retained if max_chunks is None else retained[:max_chunks]
     context = {**select_context(capped, pairs, max_chars=max_chars, max_tokens=max_tokens),
                "question": original_question,
                "score_kind": checked_searches[0].get("score_kind", "cosine") if checked_searches else "cosine",
@@ -175,7 +175,8 @@ def merge_planned_context(searches, original_question, selected_versions,
         "merged_candidates": deepcopy(retained), "selection_origins": deepcopy(origins),
         "duplicates": duplicates,
         "count_omitted": [{"chunk_id": item["chunk_id"], **deepcopy(origins[item["chunk_id"]]),
-                           "reason": "count_limit"} for item in retained[max_chunks:]],
+                           "reason": "count_limit"} for item in
+                          ([] if max_chunks is None else retained[max_chunks:])],
         "character_omitted": [{**deepcopy(item), "origin": deepcopy(origins[item["chunk_id"]])}
                               for item in context["omitted_evidence"]],
         "merged_ids": _unique_ids(retained), "count_capped_ids": _unique_ids(capped),
@@ -210,7 +211,7 @@ those decisions and uses the recorded final shown ID changes.
 """
     _parameters(5, max_chars)
     pairs = _versions(selected_versions)
-    if type(max_chunks) is not int or not 1 <= max_chunks <= 8:
+    if max_chunks is not None and (type(max_chunks) is not int or not 1 <= max_chunks <= 8):
         _fail("invalid_agent_evidence_count")
     initial = deepcopy(initial_search)
     retry = deepcopy(retry_search)
@@ -244,9 +245,9 @@ those decisions and uses the recorded final shown ID changes.
             origins[chunk_id] = {**origin, "selection_ordinal": ordinal}
             retained.append({**deepcopy(item), "rank": ordinal})
 
-    capped = retained[:max_chunks]
+    capped = retained if max_chunks is None else retained[:max_chunks]
     count_omitted = [{"chunk_id": item["chunk_id"], **deepcopy(origins[item["chunk_id"]]),
-                      "reason": "count_limit"} for item in retained[max_chunks:]]
+                      "reason": "count_limit"} for item in ([] if max_chunks is None else retained[max_chunks:])]
     context = {**select_context(capped, pairs, max_chars=max_chars, max_tokens=max_tokens), "question": original_question,
                "score_kind": initial.get("score_kind", "cosine"),
                "ranking_method": "retry_then_initial"}

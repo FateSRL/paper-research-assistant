@@ -16,6 +16,7 @@ _HEADING = re.compile(
     r"approach|experiments?|experimental setup|results|discussion|conclusions?|"
     r"limitations|摘要|引言|方法|实验|结果|讨论|结论)", re.IGNORECASE,
 )
+_TABLE_CAPTION = re.compile(r"^(?:table\s*[A-Za-z]?\d+|表\s*\d+)\b", re.IGNORECASE)
 
 
 def _heading(text):
@@ -34,12 +35,29 @@ def parent_children(parent_id, version_chunks, parent_store, *, parent=None):
     return parent, [deepcopy(children[identifier]) for identifier in parent["child_ids"]]
 
 
+def _table_caption(parent):
+    """Return the saved leading table title, or empty when it is not a caption."""
+    first = (parent.get("text") or "").split("\n", 1)[0].strip()
+    return first if first and "<" not in first and _TABLE_CAPTION.match(first) else ""
+
+
 def reading_directory(store, pairs):
-    """Keep saved body section names, page locations and parent order only."""
-    return {pair: [{"section_path": deepcopy(p.get("section_path", [])), "parent_id": p["parent_id"],
-                    "pdf_pages": list(dict.fromkeys(s["pdf_page"] for s in p.get("source_spans", [])))}
-                   for p in (store.get_version_parents(*pair) if hasattr(store, "get_version_parents") else [])
-                   if p.get("content_type") == "body"] for pair in pairs}
+    """Keep saved body and table locations, types, captions and parent order."""
+    directory = {}
+    for pair in pairs:
+        entries = []
+        for parent in (store.get_version_parents(*pair) if hasattr(store, "get_version_parents") else []):
+            content_type = parent.get("content_type")
+            if content_type not in ("body", "table"):
+                continue
+            entry = {"section_path": deepcopy(parent.get("section_path", [])), "parent_id": parent["parent_id"],
+                     "pdf_pages": list(dict.fromkeys(s["pdf_page"] for s in parent.get("source_spans", []))),
+                     "content_type": content_type}
+            if content_type == "table":
+                entry["caption"] = _table_caption(parent)
+            entries.append(entry)
+        directory[pair] = entries
+    return directory
 
 
 def retain_explicit_context(context, rows, *, source_registry=None, target_ids=(), required_rows=()):

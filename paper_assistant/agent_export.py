@@ -120,18 +120,28 @@ def render_agent_run(report: dict) -> str:
         evidence_status = EVIDENCE_STATUS_LABELS.get(answer.get("evidence_status"))
         if evidence_status:
             lines += ["回答依据：" + evidence_status + "。", ""]
-        for number, claim in enumerate(answer.get("claims", []), 1):
-            basis = claim.get("basis", "paper_evidence")
-            lines += [f"结论 {number}（{BASIS_LABELS.get(basis, '未标注依据')}）：", "", fenced(claim["claim"]), ""]
-            for quote in claim.get("evidence_quotes") or []:
-                lines += ["本项原文短引句（" + code_span(quote["chunk_id"]) + "）：", "", fenced(quote["quote"]), ""]
-            ids = claim.get("citation_ids") or []
-            if ids:
-                label = "分析前提引用：" if basis == "analysis" else "引用："
-                lines += [label + ", ".join(code_span(value) for value in ids), ""]
+        if isinstance(answer.get("text"), str):
+            lines += [answer["text"], ""]
+            citations = answer.get("citations") or []
+            if citations:
+                lines += ["引用出现序：" + ", ".join(
+                    f"[{row.get('ref')}] {code_span(row.get('chunk_id'))}" for row in citations
+                    if isinstance(row, dict)), ""]
+        else:
+            for number, claim in enumerate(answer.get("claims", []), 1):
+                basis = claim.get("basis", "paper_evidence")
+                lines += [f"结论 {number}（{BASIS_LABELS.get(basis, '未标注依据')}）：", "", fenced(claim["claim"]), ""]
+                for quote in claim.get("evidence_quotes") or []:
+                    lines += ["本项原文短引句（" + code_span(quote["chunk_id"]) + "）：", "", fenced(quote["quote"]), ""]
+                ids = claim.get("citation_ids") or []
+                if ids:
+                    label = "分析前提引用：" if basis == "analysis" else "引用："
+                    lines += [label + ", ".join(code_span(value) for value in ids), ""]
         if answer.get("reason"):
             lines += ["回答说明：", "", fenced(answer["reason"]), ""]
         for source in answer.get("evidence_sources", []):
+            if source.get("ref") is not None:
+                lines += ["证据编号：" + code_span(source["ref"]) + "。", ""]
             if source.get("title"):
                 lines += ["论文标题：", "", fenced(source["title"]), ""]
             if source.get("paper_id") or source.get("parse_revision"):
@@ -178,9 +188,13 @@ def render_agent_run(report: dict) -> str:
             })), ""]
     if autonomous:
         lines += ["## 自主决策", "",
-                  "自主步数：" + str(result.get("autonomous_steps_used")) + " / "
+                  ("自主轮数：" if result.get("loop_version") else "自主步数：") + str(result.get("autonomous_steps_used")) + " / "
                   + str(result.get("autonomous_step_limit")) + "。", "",
                   "触顶收尾：" + ("是" if result.get("limit_finalize") is True else "否") + "。", ""]
+        if result.get("loop_version"):
+            lines += ["实际取证调用：" + str(result.get("evidence_calls_used")) + "。", "",
+                "正文恢复：" + fenced(_json(result.get("recovery"))) , "",
+                "无工具综合：" + fenced(_json(result.get("synthesis"))), ""]
         for step in result.get("action_steps") or []:
             if not isinstance(step, dict):
                 continue
