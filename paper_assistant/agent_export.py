@@ -204,7 +204,8 @@ def render_agent_run(report: dict) -> str:
                 label += "（修复）"
             lines += ["### " + label, "", fenced(_json({
                 key: step.get(key) for key in ("autonomous_step", "remaining_steps", "limit_finalize",
-                                               "repair_kind", "parsed_action", "tool_observation", "tool_calls")
+                                               "repair_kind", "parsed_action", "tool_observation", "tool_calls",
+                                               "response", "error", "sdk_attempt_numbers")
             })), ""]
     plan = result.get("planned_queries", report.get("planned_queries"))
     if isinstance(plan, list) and plan:

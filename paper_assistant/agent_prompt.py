@@ -17,6 +17,10 @@ from paper_assistant.context import (
     autonomous_evidence_view,
     SHORT_REPAIR_INSTRUCTION, ContextError, build_messages,
 )
+from paper_assistant.agent_current import (
+    AUTONOMOUS_PROMPT_VERSION, PROSE_FINAL_PROMPT_VERSION, STABLE_REF_RULES,
+    PROSE_FINAL_SYSTEM_PROMPT, AUTONOMOUS_SYSTEM_PROMPT, build_react_messages,
+)
 from paper_assistant.source_scope import attach_source_requirement
 
 
@@ -260,46 +264,7 @@ direct_answer in this same response. No review or rewriting stage follows this
 generation.
 """
 
-AUTONOMOUS_PROMPT_VERSION = "v3.0-native-tool-loop-v1"
 FINAL_FACT_PROMPT_VERSION = "v2.19-history-final-answer-v1"
-PROSE_FINAL_PROMPT_VERSION = "v4.0-direct-prose-final-v1"
-# RAGFlow conf/agentic_rag.yaml and helper.go: handles live beside originals.
-STABLE_REF_RULES = """Each original passage has a stable integer ref for this question.
-In the final prose, [ID:n] must use the very same n printed beside that original.
-Only originals retained in this request's conversation and allowed_refs are
-citable; directories, candidate locations and planning material grant no refs.
-Refs can be non-contiguous and are not source-list positions. A paper's own
-bibliography [5] differs from a passage with ref=9: cite that passage as [ID:9],
-while preserving its bibliography [5] as ordinary text. Never guess a mapping.
-"""
-# Adapted from RAGFlow agentic_rag/agent.go: native tools or final prose,
-# recoverable tool/output errors return to this same loop, not a facts phase.
-AUTONOMOUS_SYSTEM_PROMPT = AGENT_COMMON_PROMPT.split("Return exactly one JSON object")[0].replace(
-    "allowed_citation_ids", "allowed_refs").replace("shown_evidence", "evidence_sections") + """
-Use native search/read_context for needed evidence and run_javascript for optional
-local calculations over provided values. Return native tool calls, or one complete
-final answer as natural-language prose in the user's requested language. There is
-no preparation action, facts JSON or mandatory second answer generation.
-End each paper-backed statement with its supporting [ID:n] handles. Pure analysis
-may omit handles, but its paper premises need their actual sources.
-Stop collecting when the requested facts, relations, conditions and necessary
-parallel items are supported; if evidence is insufficient, answer supported parts
-and state the concrete gap. Tool errors are observations: correct arguments, use
-another available lead, or answer from actual originals. Do not repeat the same
-failed network operation yourself; the client already performs permitted retries.
-Search queries use the paper's language and target the original request. Planned
-queries are optional suggestions, not a queue or a required answer outline.
-read_context accepts an actually known candidate chunk_id or a displayed directory
-parent_id. Candidate locations and directory captions locate originals; only
-actual text in evidence_sections grants citation authority. Reordering and repeated
-reads retain the same ref. Removed originals are not citable.
-Choose the next tool or final answer yourself within remaining_rounds; each model
-turn, including correction, consumes a round. Multiple native tools can share a
-turn. No independent search/read quota is imposed. Never output a tool call as
-text or an AgentAction JSON envelope. Do not concatenate process narration into
-the final answer. A completed tool-free response is the deliverable itself.
-""" + STABLE_REF_RULES + JAVASCRIPT_TOOL_RULES + ANSWER_ORGANIZATION_INSTRUCTION.replace(
-    "claims and any requested direct_answer", "the answer")
 
 
 def _contracts(actions):
@@ -484,39 +449,6 @@ def _replay_prepared_history(system, prepared_messages, prepared_response, paylo
             {"role": "user", "content": json.dumps(payload, ensure_ascii=False, allow_nan=False)}]
 
 
-PROSE_FINAL_SYSTEM_PROMPT = """You are a bounded assistant for selected papers.
-Answer the user's original question in one complete natural-language response.
-Use the current original passages and their stable refs. Those originals govern
-over previous model summaries. Do not use world knowledge to fill a missing paper fact, do not add
-unrelated findings. When run_javascript is available, you may use it for arithmetic,
-sorting, counting or aggregation over values already provided. Tool use is optional;
-the code must derive its output from those values, not print a known conclusion.
-Do not search or read new evidence in this phase. After any calculation, give the
-complete natural-language answer; do not narrate or promise future tool use.
-Preserve subjects, relations, numbers, units, dates, modality, negation,
-attribution, alternatives and qualifiers. Preserve the original precision; do
-not round intermediate calculations. If the provided evidence does not establish
-a requested paper fact, say plainly what is missing and what cannot be determined;
-use only the closest supported fact. A necessary inference must be distinguishable
-from the source statement.
-Cite provenance mechanically: every line or sentence that states a paper-backed
-fact must end with one or more handles [ID:n], where n is the ref value in the
-current source originals. Do not invent handles, cite a source that is not in the
-current original scope, or put handles in a place that does not correspond to the fact.
-The program converts these handles to the interface citations; do not write chunk
-IDs, parent IDs or tool names in the user-visible answer. A sentence that is pure
-analysis or general explanation may have no handle, but its paper premises still
-need their own supported source. Do not make the whole answer a citation list.
-If values or a comparison were derived by arithmetic from provided sources, say
-briefly that they are calculated from the stated values and cite the input
-sources; do not attribute the calculated ranking to the authors unless they wrote
-it. State the comparison scope and conditions, especially when different datasets
-or settings behave differently. Keep the smallest useful structure: short
-paragraphs, with a list only when the question asks for several items. Do not
-include meta-narration, the question restated, JSON, an action envelope, status,
-claims, basis, direct_answer, evidence_quotes or a code fence. Answer in the
-user's language and preserve any requested explanation.
-"""
 
 PROSE_FINAL_REPAIR_INSTRUCTION = """Return one corrected final answer as plain
 natural-language prose, not JSON. Keep the original question and the same
@@ -769,37 +701,3 @@ def build_action_repair_messages(question: str, context: dict, previous_content:
         repair["instruction"] += "\n" + SHORT_REPAIR_INSTRUCTION
     return [*base, {"role": "assistant", "content": previous_content or "[empty response]"},
             {"role": "user", "content": json.dumps(repair, ensure_ascii=False, allow_nan=False)}]
-
-
-def build_react_messages(question, context, *, paper_information, conversation_context,
-                         history, remaining_rounds, new_evidence_ids=None, synthesis=False, source_requirement=None):
-    """One native loop, or a single no-tool synthesis using current originals."""
-    # Reuse the existing snapshot contract; the model sees originals with refs.
-    build_messages(question, deepcopy(context))
-    view = deepcopy(context)
-    if new_evidence_ids is not None and not synthesis:
-        wanted = set(new_evidence_ids)
-        view["shown_evidence"] = [row for row in view["shown_evidence"] if row["chunk_id"] in wanted]
-    sections, papers = autonomous_evidence_view(view, paper_information)
-    payload = {"question": question, "selected_versions": deepcopy(context["selected_versions"]),
-        "evidence_sections": sections, "selected_papers": papers,
-        "allowed_refs": list(context.get("allowed_refs", [])),
-        "candidate_locations": deepcopy(context.get("candidate_locations", [])),
-        "remaining_rounds": remaining_rounds, "prompt_version": AUTONOMOUS_PROMPT_VERSION,
-        "action_schema_version": AUTONOMOUS_ACTION_SCHEMA_VERSION}
-    if source_requirement is not None:
-        payload["source_requirement"] = deepcopy(source_requirement)
-    if context.get("evidence_limitation"):
-        payload["evidence_limitation"] = context["evidence_limitation"]
-    if conversation_context is not None:
-        payload["conversation_context"] = deepcopy(conversation_context)
-    if synthesis:
-        payload.update(phase="synthesis", prompt_version=PROSE_FINAL_PROMPT_VERSION)
-        system = PROSE_FINAL_SYSTEM_PROMPT + "\n" + STABLE_REF_RULES + (
-            "\nThe research loop has ended. No tools are available. Give one complete answer "
-            "using only the current originals and completed calculations; distinguish unsupported "
-            "parts and their concrete evidence gaps. Do not promise further work.")
-    else:
-        system = AUTONOMOUS_SYSTEM_PROMPT
-    return [{"role": "system", "content": system}, *deepcopy(history),
-        {"role": "user", "content": json.dumps(payload, ensure_ascii=False, allow_nan=False)}]

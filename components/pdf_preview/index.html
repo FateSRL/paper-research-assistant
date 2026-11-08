@@ -1,0 +1,381 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>原 PDF 预览</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --border: #e5e7eb;
+      --muted: #6b7280;
+      --text: #17202a;
+      --accent: #1d4ed8;
+      --accent-soft: #eff6ff;
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; }
+    body {
+      margin: 0; background: #f5f6f8; color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+    }
+    #shell { height: 730px; display: flex; flex-direction: column; min-height: 360px; }
+    #toolbar {
+      position: sticky; top: 0; z-index: 3; flex: none;
+      display: flex; align-items: center; gap: 10px; min-height: 46px;
+      padding: 8px 12px; background: rgba(255,255,255,.97);
+      border-bottom: 1px solid var(--border); backdrop-filter: blur(8px);
+    }
+    #title { flex: 1; min-width: 0; font-size: 13px; font-weight: 650; overflow: hidden;
+      text-overflow: ellipsis; white-space: nowrap; }
+    #page-status { flex: none; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+    .tool-button {
+      flex: none; border: 1px solid var(--border); background: #fff; color: #374151;
+      border-radius: 7px; padding: 5px 9px; font: inherit; font-size: 12px; cursor: pointer;
+    }
+    .tool-button:hover:not(:disabled) { background: #f9fafb; border-color: #d1d5db; }
+    .tool-button:disabled { opacity: .45; cursor: default; }
+    #viewer { position: relative; flex: 1; overflow: auto; padding: 14px 14px 30px; scroll-behavior: smooth; }
+    #pages { width: 100%; }
+    .page {
+      position: relative; width: fit-content; margin: 0 auto 14px; background: #fff;
+      box-shadow: 0 1px 3px rgba(0,0,0,.14), 0 0 0 1px rgba(0,0,0,.04);
+    }
+    .page canvas { display: block; max-width: 100%; height: auto; }
+    .page-label {
+      position: absolute; top: 8px; right: 8px; z-index: 1;
+      background: rgba(17,24,39,.78); color: #fff; border-radius: 999px;
+      padding: 3px 8px; font-size: 11px; line-height: 1.4; font-variant-numeric: tabular-nums;
+      pointer-events: none;
+    }
+    .page.target { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .page.target .page-label { background: var(--accent); }
+    #rect-count { flex: none; color: var(--accent); font-size: 12px; font-variant-numeric: tabular-nums; }
+    .highlight-layer { position: absolute; inset: 0; z-index: 1; pointer-events: none; }
+    .highlight-layer.is-hidden { display: none; }
+    .source-rect {
+      position: absolute; box-sizing: border-box; pointer-events: none;
+      border: 2px solid rgba(29, 78, 216, .82);
+      background: rgba(29, 78, 216, .08); border-radius: 2px;
+    }
+    #empty {
+      display: none; height: 100%; min-height: 260px; align-items: center; justify-content: center;
+      padding: 24px; text-align: center;
+    }
+    #empty.visible { display: flex; }
+    #empty-card {
+      max-width: 620px; background: #fff; border: 1px solid var(--border);
+      border-radius: 12px; padding: 22px 24px; box-shadow: 0 4px 16px rgba(0,0,0,.05);
+    }
+    #empty-title { font-size: 14px; font-weight: 650; margin: 0 0 8px; }
+    #empty-message { font-size: 13px; line-height: 1.75; color: #4b5563; margin: 0; text-align: left;
+      white-space: pre-wrap; overflow-wrap: anywhere; }
+    #loading { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+      background: rgba(245,246,248,.92); z-index: 2; font-size: 13px; color: var(--muted); }
+    #loading.hidden { display: none; }
+    .spinner {
+      width: 18px; height: 18px; margin-right: 9px; border: 2px solid #d1d5db;
+      border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite;
+      display: inline-block; vertical-align: -4px;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+  <div id="shell">
+    <div id="toolbar">
+      <button id="prev" class="tool-button" type="button" aria-label="上一页">上一页</button>
+      <button id="next" class="tool-button" type="button" aria-label="下一页">下一页</button>
+      <div id="title">原 PDF</div>
+      <div id="page-status">等待文档</div>
+      <div id="rect-count"></div>
+    </div>
+    <div id="viewer">
+      <div id="loading"><span class="spinner"></span><span id="loading-text">正在载入 PDF…</span></div>
+      <div id="pages"></div>
+      <div id="empty" role="status">
+        <div id="empty-card">
+          <p id="empty-title">原 PDF 预览不可用</p>
+          <p id="empty-message"></p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script type="module">
+    import * as pdfjsLib from "./pdf.min.js";
+
+    const viewer = document.getElementById("viewer");
+    const pagesHost = document.getElementById("pages");
+    const titleEl = document.getElementById("title");
+    const statusEl = document.getElementById("page-status");
+    const rectCountEl = document.getElementById("rect-count");
+    const prevButton = document.getElementById("prev");
+    const nextButton = document.getElementById("next");
+    const loadingEl = document.getElementById("loading");
+    const loadingText = document.getElementById("loading-text");
+    const emptyEl = document.getElementById("empty");
+    const emptyTitle = document.getElementById("empty-title");
+    const emptyMessage = document.getElementById("empty-message");
+
+    let pdfDocument = null;
+    let pageElements = [];
+    let pageNumbers = [];
+    let targetPage = 1;
+    let currentPage = 1;
+    let targetRects = [];
+    let loadingTask = null;
+    let renderToken = 0;
+    let args = {};
+
+    function post(type, data) {
+      window.parent.postMessage(Object.assign({
+        isStreamlitMessage: true,
+        type
+      }, data || {}), "*");
+    }
+
+    function setHeight() {
+      post("streamlit:setFrameHeight", { height: 730 });
+    }
+
+    function clearViewer() {
+      pagesHost.replaceChildren();
+      pageElements = [];
+      pageNumbers = [];
+      targetRects = [];
+      rectCountEl.textContent = "";
+      pdfDocument = null;
+      loadingTask = null;
+    }
+
+    function showEmpty(title, message) {
+      loadingEl.classList.add("hidden");
+      emptyEl.classList.add("visible");
+      emptyTitle.textContent = title || "原 PDF 预览不可用";
+      emptyMessage.textContent = message || "来源文件或页序不可用，仍可在引用来源中查看原文。";
+      titleEl.textContent = args.title || "原 PDF";
+      statusEl.textContent = "无法定位";
+      rectCountEl.textContent = "";
+      prevButton.disabled = true;
+      nextButton.disabled = true;
+      setHeight();
+    }
+
+    function hideEmpty() {
+      emptyEl.classList.remove("visible");
+    }
+
+    function setStatus(page) {
+      const total = pageNumbers.length || args.total_pages || 0;
+      statusEl.textContent = total ? `第 ${page} / ${total} 页` : "等待文档";
+      prevButton.disabled = page <= 1;
+      nextButton.disabled = !total || page >= total;
+    }
+
+    function setActivePage(page) {
+      currentPage = Math.min(Math.max(1, page), pageNumbers.length || 1);
+      pageElements.forEach((element, index) => {
+        if (index + 1 === currentPage) element.classList.add("target");
+        else element.classList.remove("target");
+        const layer = element.querySelector(".highlight-layer");
+        if (layer) layer.classList.toggle("is-hidden", index + 1 !== targetPage);
+      });
+      setStatus(currentPage);
+    }
+
+    function goToPage(page, smooth = true) {
+      if (!pageNumbers.length) return;
+      const index = Math.min(Math.max(1, Number(page) || 1), pageNumbers.length) - 1;
+      const element = pageElements[index];
+      if (!element) return;
+      setActivePage(index + 1);
+      if (smooth) element.scrollIntoView({ behavior: "smooth", block: "start" });
+      else viewer.scrollTop = Math.max(0, element.offsetTop - 8);
+    }
+
+    function updateVisiblePage() {
+      if (!pageElements.length) return;
+      const top = viewer.scrollTop + 18;
+      let visible = 1;
+      for (let i = 0; i < pageElements.length; i += 1) {
+        if (pageElements[i].offsetTop <= top) visible = i + 1;
+        else break;
+      }
+      if (visible !== currentPage) setActivePage(visible);
+    }
+
+    function normalizeRects(spans, page) {
+      const rects = [];
+      if (!Array.isArray(spans)) return rects;
+      const seen = new Set();
+      for (const span of spans) {
+        if (!span || typeof span !== "object") continue;
+        if (span.pdf_page !== page) continue;
+        if (span.coordinate_system && span.coordinate_system !== "normalized") continue;
+        const bbox = span.bbox;
+        if (!Array.isArray(bbox) || bbox.length !== 4) continue;
+        if (!bbox.every((value) => typeof value === "number" && Number.isFinite(value))) continue;
+        const [x0, y0, x1, y1] = bbox;
+        if (x0 < 0 || y0 < 0 || x1 > 1 || y1 > 1 || x1 <= x0 || y1 <= y0) continue;
+        const key = bbox.map((value) => value.toFixed(12)).join(",");
+        if (seen.has(key)) continue;
+        seen.add(key);
+        rects.push({
+          bbox: [x0, y0, x1, y1],
+          blockId: typeof span.block_id === "string" ? span.block_id : "",
+          contentType: typeof span.content_type === "string" ? span.content_type : ""
+        });
+      }
+      rects.sort((a, b) => a.bbox[1] - b.bbox[1] || a.bbox[0] - b.bbox[0]);
+      return rects;
+    }
+
+    function addHighlights(pageElement, rects) {
+      if (!rects.length) return;
+      const layer = document.createElement("div");
+      layer.className = "highlight-layer";
+      rects.forEach((rect, index) => {
+        const box = document.createElement("div");
+        box.className = "source-rect";
+        box.dataset.rectIndex = String(index);
+        box.dataset.bbox = JSON.stringify(rect.bbox);
+        if (rect.blockId) box.dataset.blockId = rect.blockId;
+        if (rect.contentType) box.dataset.contentType = rect.contentType;
+        box.style.left = `${rect.bbox[0] * 100}%`;
+        box.style.top = `${rect.bbox[1] * 100}%`;
+        box.style.width = `${(rect.bbox[2] - rect.bbox[0]) * 100}%`;
+        box.style.height = `${(rect.bbox[3] - rect.bbox[1]) * 100}%`;
+        layer.appendChild(box);
+      });
+      pageElement.appendChild(layer);
+    }
+
+    function scrollToTopRect() {
+      if (!targetRects.length) return;
+      const pageElement = pageElements[targetPage - 1];
+      if (!pageElement) return;
+      const y = targetRects[0].bbox[1] * pageElement.clientHeight;
+      viewer.scrollTop = Math.max(0, pageElement.offsetTop + y - 10);
+      setActivePage(targetPage);
+    }
+
+    function decodeBase64(value) {
+      const binary = atob(value || "");
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+      return bytes;
+    }
+
+    async function renderDocument() {
+      const token = ++renderToken;
+      clearViewer();
+      hideEmpty();
+      viewer.scrollTop = 0;
+      setStatus(1);
+      const error = args.error || "";
+      if (error) {
+        showEmpty("原 PDF 预览不可用", error + "\n\n引用原文仍可在来源卡片中查看。");
+        return;
+      }
+      if (!args.pdf_base64) {
+        showEmpty("原 PDF 预览不可用", "没有收到可预览的 PDF 文件数据。\n\n引用原文仍可在来源卡片中查看。");
+        return;
+      }
+      titleEl.textContent = args.title || "原 PDF";
+      loadingEl.classList.remove("hidden");
+      loadingText.textContent = "正在载入 PDF…";
+      const worker = new Worker(new URL("./pdf.worker.min.js", import.meta.url), { type: "module" });
+      pdfjsLib.GlobalWorkerOptions.workerPort = worker;
+      try {
+        const data = decodeBase64(args.pdf_base64);
+        loadingTask = pdfjsLib.getDocument({
+          data,
+          cMapUrl: new URL("./cmaps/", import.meta.url).href,
+          cMapPacked: true,
+          standardFontDataUrl: new URL("./standard_fonts/", import.meta.url).href,
+          wasmUrl: new URL("./wasm/", import.meta.url).href,
+          isEvalSupported: false
+        });
+        pdfDocument = await loadingTask.promise;
+        if (token !== renderToken) return;
+        const total = pdfDocument.numPages;
+        targetPage = Math.min(Math.max(1, Number(args.page) || 1), total);
+        targetRects = normalizeRects(args.source_spans, targetPage);
+        rectCountEl.textContent = targetRects.length ? `引用区域 ${targetRects.length}` : "";
+        const baseWidth = Math.max(320, viewer.clientWidth - 32);
+        loadingText.textContent = `正在排版 ${total} 页…`;
+        for (let number = 1; number <= total; number += 1) {
+          const page = await pdfDocument.getPage(number);
+          if (token !== renderToken) return;
+          const unscaled = page.getViewport({ scale: 1 });
+          const scale = Math.min(1.65, Math.max(0.65, baseWidth / unscaled.width));
+          const viewport = page.getViewport({ scale });
+          const ratio = window.devicePixelRatio || 1;
+          const canvas = document.createElement("canvas");
+          canvas.width = Math.floor(viewport.width * ratio);
+          canvas.height = Math.floor(viewport.height * ratio);
+          canvas.style.width = `${Math.floor(viewport.width)}px`;
+          canvas.style.height = `${Math.floor(viewport.height)}px`;
+          const context = canvas.getContext("2d", { alpha: false });
+          await page.render({
+            canvasContext: context,
+            viewport,
+            transform: ratio !== 1 ? [ratio, 0, 0, ratio, 0, 0] : undefined
+          }).promise;
+          if (token !== renderToken) return;
+          const wrapper = document.createElement("div");
+          wrapper.className = "page";
+          wrapper.dataset.page = String(number);
+          const label = document.createElement("div");
+          label.className = "page-label";
+          label.textContent = `第 ${number} 页`;
+          wrapper.appendChild(canvas);
+          wrapper.appendChild(label);
+          if (number === targetPage && targetRects.length) addHighlights(wrapper, targetRects);
+          pagesHost.appendChild(wrapper);
+          pageElements.push(wrapper);
+          pageNumbers.push(number);
+          page.cleanup();
+        }
+        if (token !== renderToken) return;
+        loadingEl.classList.add("hidden");
+        setActivePage(targetPage);
+        setStatus(targetPage);
+        // Wait one frame so every page has its final height before locating.
+        await new Promise(requestAnimationFrame);
+        if (token === renderToken) {
+          if (targetRects.length) scrollToTopRect();
+          else goToPage(targetPage, false);
+        }
+      } catch (errorObject) {
+        if (token !== renderToken) return;
+        const message = errorObject && errorObject.message ? errorObject.message : String(errorObject || "未知错误");
+        showEmpty("原 PDF 载入失败", "无法载入这份 PDF：" + message + "\n\n引用原文仍可在来源卡片中查看。");
+      }
+    }
+
+    prevButton.addEventListener("click", () => goToPage(currentPage - 1));
+    nextButton.addEventListener("click", () => goToPage(currentPage + 1));
+    viewer.addEventListener("scroll", () => updateVisiblePage(), { passive: true });
+
+    window.addEventListener("message", (event) => {
+      const incoming = event.data;
+      if (!incoming || incoming.type !== "streamlit:render") return;
+      args = incoming.args || {};
+      renderDocument();
+    });
+
+    window.addEventListener("resize", () => {
+      // Keep the iframe height stable; PDF pages are reflowed only on a new open.
+      setHeight();
+    });
+
+    post("streamlit:componentReady", { apiVersion: 1 });
+    setTimeout(setHeight, 0);
+    // Draw an immediate neutral state while waiting for the first render message.
+    titleEl.textContent = "原 PDF";
+    statusEl.textContent = "等待文档";
+  </script>
+</body>
+</html>

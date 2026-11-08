@@ -1,0 +1,342 @@
+{
+  "papers": {
+    "1908.05828": {
+      "paper_key": "P01",
+      "arxiv_id": "1908.05828",
+      "title": "Named Entity Recognition for Nepali Language",
+      "candidate_pdf": "eval/qasper/pdfs/1908.05828v1.pdf",
+      "candidate_pdf_url": "https://arxiv.org/pdf/1908.05828v1",
+      "version_check": {
+        "pdf_version": "v1",
+        "pdf_path": "eval/qasper/pdfs/1908.05828v1.pdf",
+        "pdf_bytes": 470822,
+        "page_count": 10,
+        "sha256": "e4f96c27168894e6509912ee08f7107f4eb32b13a50209800147e0ec7f492337",
+        "title_in_pdf_exact_normalized": true,
+        "abstract_in_pdf_exact_normalized": false,
+        "official_evidence_sentence_total": 77,
+        "official_evidence_sentence_hits": 35,
+        "official_evidence_sentence_hit_rate": 0.4545,
+        "basis": "arXiv v1 title/abstract and official QASPER evidence sentences checked against whole-PDF text; exact paragraph mapping is diagnosed later on the actual imported chunks.",
+        "status": "confirmed"
+      },
+      "paper_id": "local_1a357bf97afe42c8be9b67f7ef3ea136",
+      "parse_revision": "r_b22132ec20eee885",
+      "ready": true,
+      "chunk_count": 40,
+      "import_status": "ready",
+      "evidence_mapping": {
+        "total": 5,
+        "mapped": 5,
+        "parse_missing": 0,
+        "non_evidence_groups": 0
+      }
+    },
+    "1910.06592": {
+      "paper_key": "P02",
+      "arxiv_id": "1910.06592",
+      "title": "FacTweet: Profiling Fake News Twitter Accounts",
+      "candidate_pdf": "eval/qasper/pdfs/1910.06592v1.pdf",
+      "candidate_pdf_url": "https://arxiv.org/pdf/1910.06592v1",
+      "version_check": {
+        "pdf_version": "v1",
+        "pdf_path": "eval/qasper/pdfs/1910.06592v1.pdf",
+        "pdf_bytes": 913305,
+        "page_count": 8,
+        "sha256": "3bdf7e026a91e3f3ee74f6cdc506beb257fbbb6b0e9f9eced99f6913a774a31d",
+        "title_in_pdf_exact_normalized": true,
+        "abstract_in_pdf_exact_normalized": true,
+        "official_evidence_sentence_total": 198,
+        "official_evidence_sentence_hits": 123,
+        "official_evidence_sentence_hit_rate": 0.6212,
+        "basis": "arXiv v1 title/abstract and official QASPER evidence sentences checked against whole-PDF text; exact paragraph mapping is diagnosed later on the actual imported chunks.",
+        "status": "confirmed"
+      },
+      "paper_id": "local_7e4232cb4ac943f88a87bebd6e676de1",
+      "parse_revision": "r_c88d17ac33361b89",
+      "ready": true,
+      "chunk_count": 17,
+      "import_status": "ready",
+      "evidence_mapping": {
+        "total": 4,
+        "mapped": 4,
+        "parse_missing": 0,
+        "non_evidence_groups": 2
+      }
+    },
+    "1905.11268": {
+      "paper_key": "P03",
+      "arxiv_id": "1905.11268",
+      "title": "Combating Adversarial Misspellings with Robust Word Recognition",
+      "candidate_pdf": "eval/qasper/pdfs/1905.11268v1.pdf",
+      "candidate_pdf_url": "https://arxiv.org/pdf/1905.11268v1",
+      "version_check": {
+        "pdf_version": "v1",
+        "pdf_path": "eval/qasper/pdfs/1905.11268v1.pdf",
+        "pdf_bytes": 476143,
+        "page_count": 10,
+        "sha256": "893f83f84e901246788a023483e1f8fbc9c94d230eb2f02bab414b6507bd9b10",
+        "title_in_pdf_exact_normalized": true,
+        "abstract_in_pdf_exact_normalized": false,
+        "official_evidence_sentence_total": 73,
+        "official_evidence_sentence_hits": 48,
+        "official_evidence_sentence_hit_rate": 0.6575,
+        "basis": "arXiv v1 title/abstract and official QASPER evidence sentences checked against whole-PDF text; exact paragraph mapping is diagnosed later on the actual imported chunks.",
+        "status": "confirmed"
+      },
+      "paper_id": "local_75d3419977b543aba949f769ed4e80c0",
+      "parse_revision": "r_1b75f45702948a24",
+      "ready": true,
+      "chunk_count": 36,
+      "import_status": "ready",
+      "evidence_mapping": {
+        "total": 4,
+        "mapped": 4,
+        "parse_missing": 0,
+        "non_evidence_groups": 0
+      }
+    },
+    "1908.04042": {
+      "paper_key": "P04",
+      "arxiv_id": "1908.04042",
+      "title": "Evaluating Tag Recommendations for E-Book Annotation Using a Semantic Similarity Metric",
+      "candidate_pdf": "eval/qasper/pdfs/1908.04042v1.pdf",
+      "candidate_pdf_url": "https://arxiv.org/pdf/1908.04042v1",
+      "version_check": {
+        "pdf_version": "v1",
+        "pdf_path": "eval/qasper/pdfs/1908.04042v1.pdf",
+        "pdf_bytes": 767519,
+        "page_count": 6,
+        "sha256": "5415218507f2376dba0a365e9910eb1614e541a2638a51eae74d42894f4ed7be",
+        "title_in_pdf_exact_normalized": true,
+        "abstract_in_pdf_exact_normalized": true,
+        "official_evidence_sentence_total": 41,
+        "official_evidence_sentence_hits": 28,
+        "official_evidence_sentence_hit_rate": 0.6829,
+        "basis": "arXiv v1 title/abstract and official QASPER evidence sentences checked against whole-PDF text; exact paragraph mapping is diagnosed later on the actual imported chunks.",
+        "status": "confirmed"
+      },
+      "paper_id": "local_de778b72149f40459f23d379f0682e10",
+      "parse_revision": "r_ac85fcb80198fcf5",
+      "ready": true,
+      "chunk_count": 27,
+      "import_status": "ready",
+      "evidence_mapping": {
+        "total": 5,
+        "mapped": 5,
+        "parse_missing": 0,
+        "non_evidence_groups": 0
+      }
+    },
+    "1912.03627": {
+      "paper_key": "P05",
+      "arxiv_id": "1912.03627",
+      "title": "A Multi Purpose and Large Scale Speech Corpus in Persian and English for Speaker and Speech Recognition: The Deepmine Database",
+      "candidate_pdf": "eval/qasper/pdfs/1912.03627v1.pdf",
+      "candidate_pdf_url": "https://arxiv.org/pdf/1912.03627v1",
+      "version_check": {
+        "pdf_version": "v1",
+        "pdf_path": "eval/qasper/pdfs/1912.03627v1.pdf",
+        "pdf_bytes": 120783,
+        "page_count": 6,
+        "sha256": "e76e2e38025c7d9474ba942e9eb134d586876ac9ef4e8f7f9bd0ea7b827c13ee",
+        "title_in_pdf_exact_normalized": true,
+        "abstract_in_pdf_exact_normalized": true,
+        "official_evidence_sentence_total": 40,
+        "official_evidence_sentence_hits": 32,
+        "official_evidence_sentence_hit_rate": 0.8,
+        "basis": "arXiv v1 title/abstract and official QASPER evidence sentences checked against whole-PDF text; exact paragraph mapping is diagnosed later on the actual imported chunks.",
+        "status": "confirmed"
+      },
+      "paper_id": "local_ab96fffc59414b1aac0afec3c6053e4e",
+      "parse_revision": "r_a5bfa80f55c8e628",
+      "ready": true,
+      "chunk_count": 38,
+      "import_status": "ready",
+      "evidence_mapping": {
+        "total": 2,
+        "mapped": 2,
+        "parse_missing": 0,
+        "non_evidence_groups": 1
+      }
+    },
+    "1912.08904": {
+      "paper_key": "P06",
+      "arxiv_id": "1912.08904",
+      "title": "Macaw: An Extensible Conversational Information Seeking Platform",
+      "candidate_pdf": "eval/qasper/pdfs/1912.08904v1.pdf",
+      "candidate_pdf_url": "https://arxiv.org/pdf/1912.08904v1",
+      "version_check": {
+        "pdf_version": "v1",
+        "pdf_path": "eval/qasper/pdfs/1912.08904v1.pdf",
+        "pdf_bytes": 1256902,
+        "page_count": 5,
+        "sha256": "3b4682f9d816d2bba012784a8a2644bc4e48dec07938ec1b86f04e652ad21fb4",
+        "title_in_pdf_exact_normalized": true,
+        "abstract_in_pdf_exact_normalized": true,
+        "official_evidence_sentence_total": 98,
+        "official_evidence_sentence_hits": 78,
+        "official_evidence_sentence_hit_rate": 0.7959,
+        "basis": "arXiv v1 title/abstract and official QASPER evidence sentences checked against whole-PDF text; exact paragraph mapping is diagnosed later on the actual imported chunks.",
+        "status": "confirmed"
+      },
+      "paper_id": "local_565341cc848a4ec0a3f6333571ede85d",
+      "parse_revision": "r_67088947d869af75",
+      "ready": true,
+      "chunk_count": 16,
+      "import_status": "ready",
+      "evidence_mapping": {
+        "total": 4,
+        "mapped": 4,
+        "parse_missing": 0,
+        "non_evidence_groups": 2
+      }
+    },
+    "2003.13032": {
+      "paper_key": "P07",
+      "arxiv_id": "2003.13032",
+      "title": "Named Entities in Medical Case Reports: Corpus and Experiments",
+      "candidate_pdf": "eval/qasper/pdfs/2003.13032v1.pdf",
+      "candidate_pdf_url": "https://arxiv.org/pdf/2003.13032v1",
+      "version_check": {
+        "pdf_version": "v1",
+        "pdf_path": "eval/qasper/pdfs/2003.13032v1.pdf",
+        "pdf_bytes": 286856,
+        "page_count": 6,
+        "sha256": "d1aa554f45d35503973b7602a69b2701827ed4609666d4aa8be1621be320b037",
+        "title_in_pdf_exact_normalized": true,
+        "abstract_in_pdf_exact_normalized": true,
+        "official_evidence_sentence_total": 130,
+        "official_evidence_sentence_hits": 70,
+        "official_evidence_sentence_hit_rate": 0.5385,
+        "basis": "arXiv v1 title/abstract and official QASPER evidence sentences checked against whole-PDF text; exact paragraph mapping is diagnosed later on the actual imported chunks.",
+        "status": "confirmed"
+      },
+      "paper_id": "local_1a4939d1674d445aa489f7f9a58b946d",
+      "parse_revision": "r_c9adf6a31fb2e4d2",
+      "ready": true,
+      "chunk_count": 31,
+      "import_status": "ready",
+      "evidence_mapping": {
+        "total": 4,
+        "mapped": 4,
+        "parse_missing": 0,
+        "non_evidence_groups": 4
+      }
+    },
+    "1910.03634": {
+      "paper_key": "P08",
+      "arxiv_id": "1910.03634",
+      "title": "Prose for a Painting",
+      "candidate_pdf": "eval/qasper/pdfs/1910.03634v1.pdf",
+      "candidate_pdf_url": "https://arxiv.org/pdf/1910.03634v1",
+      "version_check": {
+        "pdf_version": "v1",
+        "pdf_path": "eval/qasper/pdfs/1910.03634v1.pdf",
+        "pdf_bytes": 2514283,
+        "page_count": 4,
+        "sha256": "cbcb4fe6d98bf1787b246025b4dae2aaade66d549be3cc1b750c1aabc569d099",
+        "title_in_pdf_exact_normalized": true,
+        "abstract_in_pdf_exact_normalized": true,
+        "official_evidence_sentence_total": 39,
+        "official_evidence_sentence_hits": 30,
+        "official_evidence_sentence_hit_rate": 0.7692,
+        "basis": "arXiv v1 title/abstract and official QASPER evidence sentences checked against whole-PDF text; exact paragraph mapping is diagnosed later on the actual imported chunks.",
+        "status": "confirmed"
+      },
+      "paper_id": "local_d58a3b658c4143aebb35d7e4e0399171",
+      "parse_revision": "r_e814b1d5f3c7fcc1",
+      "ready": true,
+      "chunk_count": 20,
+      "import_status": "ready",
+      "evidence_mapping": {
+        "total": 4,
+        "mapped": 4,
+        "parse_missing": 0,
+        "non_evidence_groups": 0
+      }
+    },
+    "1707.06806": {
+      "paper_key": "P09",
+      "arxiv_id": "1707.06806",
+      "title": "Shallow reading with Deep Learning: Predicting popularity of online content using only its title",
+      "candidate_pdf": "eval/qasper/pdfs/1707.06806v1.pdf",
+      "candidate_pdf_url": "https://arxiv.org/pdf/1707.06806v1",
+      "version_check": {
+        "pdf_version": "v1",
+        "pdf_path": "eval/qasper/pdfs/1707.06806v1.pdf",
+        "pdf_bytes": 609613,
+        "page_count": 10,
+        "sha256": "1e9b4652d66996665f545ebdf01876785259e48cb0e22410b6c3f6e18b6e8cd6",
+        "title_in_pdf_exact_normalized": true,
+        "abstract_in_pdf_exact_normalized": true,
+        "official_evidence_sentence_total": 30,
+        "official_evidence_sentence_hits": 16,
+        "official_evidence_sentence_hit_rate": 0.5333,
+        "basis": "arXiv v1 title/abstract and official QASPER evidence sentences checked against whole-PDF text; exact paragraph mapping is diagnosed later on the actual imported chunks.",
+        "status": "confirmed"
+      },
+      "paper_id": "local_549e290ff76d476c97eff635b544a574",
+      "parse_revision": "r_e63e8866dbbfcd17",
+      "ready": true,
+      "chunk_count": 26,
+      "import_status": "ready",
+      "evidence_mapping": {
+        "total": 4,
+        "mapped": 4,
+        "parse_missing": 0,
+        "non_evidence_groups": 0
+      }
+    },
+    "1903.11437": {
+      "paper_key": "P10",
+      "arxiv_id": "1903.11437",
+      "title": "Using Monolingual Data in Neural Machine Translation: a Systematic Study",
+      "candidate_pdf": "eval/qasper/pdfs/1903.11437v1.pdf",
+      "candidate_pdf_url": "https://arxiv.org/pdf/1903.11437v1",
+      "version_check": {
+        "pdf_version": "v1",
+        "pdf_path": "eval/qasper/pdfs/1903.11437v1.pdf",
+        "pdf_bytes": 648648,
+        "page_count": 12,
+        "sha256": "10a33be340b1b8ae4979c63aad06fcce306224ecf8e908891bb9acd5d6aad434",
+        "title_in_pdf_exact_normalized": true,
+        "abstract_in_pdf_exact_normalized": false,
+        "official_evidence_sentence_total": 67,
+        "official_evidence_sentence_hits": 46,
+        "official_evidence_sentence_hit_rate": 0.6866,
+        "basis": "arXiv v1 title/abstract and official QASPER evidence sentences checked against whole-PDF text; exact paragraph mapping is diagnosed later on the actual imported chunks.",
+        "status": "confirmed"
+      },
+      "paper_id": "local_738a5d026f674ede874cf82efc4e4439",
+      "parse_revision": "r_0008397a53cc7c94",
+      "ready": true,
+      "chunk_count": 61,
+      "import_status": "ready",
+      "evidence_mapping": {
+        "total": 5,
+        "mapped": 5,
+        "parse_missing": 0,
+        "non_evidence_groups": 0
+      },
+      "import_attempts": [
+        {
+          "attempt": 1,
+          "status": "failed",
+          "elapsed_seconds": 41.978772,
+          "error": "MinerU 解析失败：parsing failed, please try again later",
+          "paper_id": null,
+          "parse_revision": null
+        },
+        {
+          "attempt": 2,
+          "status": "ready",
+          "elapsed_seconds": 77.095704,
+          "paper_id": "local_738a5d026f674ede874cf82efc4e4439",
+          "parse_revision": "r_0008397a53cc7c94"
+        }
+      ]
+    }
+  },
+  "note": "Ten QASPER-dev arXiv v1 PDFs were checked against official title/abstract/evidence, imported through import_pdf, and bound to actual paper_id/parse_revision. Nine layout/section locator annotations were excluded from required evidence; no positive-evidence case is parse_missing."
+}

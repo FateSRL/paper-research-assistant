@@ -9,3 +9,6 @@ qdrant-client==1.19.1
 streamlit==1.65.0
 tokenizers==0.23.3
 mini-racer==0.12.4
+langchain-core==1.7.3
+langchain==1.4.7
+langgraph==1.2.19

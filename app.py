@@ -1,5 +1,6 @@
 """论文聊天页面；正文按段落展示，点击引用编号查看原文。"""
 
+import base64
 from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor
 import json
@@ -8,7 +9,10 @@ from queue import Empty, Queue
 import re
 import uuid
 
+import pymupdf
 import streamlit as st
+import streamlit.components.v1 as components
+import streamlit.components.v2 as components_v2
 
 from paper_assistant import d9_runtime, import_runtime
 from paper_assistant.answer_export import BASIS_LABELS, EVIDENCE_STATUS_LABELS
@@ -16,6 +20,19 @@ from paper_assistant.conversation import select_conversation_history
 
 
 ROOT = Path(__file__).resolve().parent
+PDF_PREVIEW_COMPONENT = components.declare_component(
+    "pdf_preview", path=str(ROOT / "components" / "pdf_preview"))
+PDF_PREVIEW_REQUEST_KEY = "pdf_preview_request"
+PDF_PREVIEW_SEQUENCE_KEY = "pdf_preview_sequence"
+PDF_PREVIEW_SHOWN_KEY = "pdf_preview_shown_token"
+D8_REF_HANDLED_KEY = "d8_inline_ref_handled"
+D8_INLINE_REFS = components_v2.component(
+    "d8_inline_refs",
+    html='<div class="d8-ref-root" aria-hidden="true"></div>',
+    css=(ROOT / "components" / "inline_refs.css").read_text(encoding="utf-8"),
+    js=(ROOT / "components" / "inline_refs.js").read_text(encoding="utf-8"),
+    isolate_styles=False,
+)
 REPORT_KEY = "current_report"
 PENDING_KEY = "d9_pending_submission"
 SUBMISSIONS_KEY = "d9_submission_records"
@@ -109,6 +126,19 @@ CHAT_STYLE = """
 </style>
 """
 
+WIDE_CHAT_STYLE = """
+<style>
+.stMainBlockContainer { max-width: 100% !important; padding-left: 2rem; padding-right: 2rem; }
+[data-testid="stColumn"]:has([class*="st-key-pdf_preview_pane_wrap"]) {
+    position: sticky; top: 4.5rem; align-self: flex-start;
+}
+[class*="st-key-question"] {
+    position: sticky !important; top: 4.5rem; z-index: 20;
+    background: #ffffff;
+}
+</style>
+"""
+
 
 def _number(value):
     return str(value) if type(value) is int and value >= 0 else "未知"
@@ -139,7 +169,241 @@ def _render_questions(report):
         st.text("补全后的完整问题：本轮未形成完整问题。")
 
 
-def _show_source(source, number, *, shown=False):
+def _pdf_preview_issue(source):
+    """返回来源能否进入原 PDF 预览；文件存在性留给弹窗报告。"""
+    if not isinstance(source, dict):
+        return "来源记录不可用。"
+    page = source.get("pdf_page")
+    if type(page) is not int or page < 1:
+        return "来源没有可用的 PDF 文件页序。"
+    if not _text(source.get("pdf_absolute_path")):
+        return "来源没有已校验的本地 PDF 文件。"
+    return None
+
+
+def _load_pdf_preview(source):
+    """读取已校验来源对应的本地 PDF；不访问模型、索引或网络。"""
+    result = {"error": None, "page": 1, "total": None, "data": ""}
+    if not isinstance(source, dict):
+        result["error"] = "来源记录不可用。"
+        return result
+    page = source.get("pdf_page")
+    if type(page) is not int or page < 1:
+        result["error"] = "来源没有可用的 PDF 文件页序。"
+        return result
+    result["page"] = page
+    path_text = _text(source.get("pdf_absolute_path"))
+    if not path_text:
+        result["error"] = "来源没有已校验的本地 PDF 文件。"
+        return result
+    try:
+        papers = (ROOT / "data" / "papers").resolve()
+        path = Path(path_text).resolve()
+        if not path.is_relative_to(papers) or path.suffix.lower() != ".pdf":
+            result["error"] = "来源 PDF 路径不在允许的论文目录内。"
+            return result
+        if not path.is_file():
+            result["error"] = "来源 PDF 文件不存在：" + path.name
+            return result
+        with pymupdf.open(path) as document:
+            total = document.page_count
+            if total < 1:
+                result["error"] = "来源 PDF 没有可显示的页面。"
+                return result
+            result["total"] = total
+            if page > total:
+                result["error"] = f"来源页序 {page} 超出 PDF 总页数 {total}。"
+                return result
+        result["data"] = base64.b64encode(path.read_bytes()).decode("ascii")
+    except Exception:
+        result["error"] = "来源 PDF 无法读取。"
+    return result
+
+
+def _request_pdf_preview(source):
+    sequence = int(st.session_state.get(PDF_PREVIEW_SEQUENCE_KEY, 0)) + 1
+    st.session_state[PDF_PREVIEW_SEQUENCE_KEY] = sequence
+    st.session_state[PDF_PREVIEW_REQUEST_KEY] = {
+        "token": sequence, "source": deepcopy(source) if isinstance(source, dict) else {}}
+
+
+def _dismiss_pdf_preview():
+    st.session_state.pop(PDF_PREVIEW_REQUEST_KEY, None)
+
+
+def _active_pdf_preview():
+    request = st.session_state.get(PDF_PREVIEW_REQUEST_KEY)
+    if not isinstance(request, dict) or type(request.get("token")) is not int:
+        return None
+    source = request.get("source")
+    return request if isinstance(source, dict) else None
+
+
+def _clear_pdf_preview():
+    st.session_state.pop(PDF_PREVIEW_REQUEST_KEY, None)
+    st.session_state.pop(PDF_PREVIEW_SHOWN_KEY, None)
+
+
+def _close_pdf_preview():
+    _clear_pdf_preview()
+
+
+def _render_pdf_preview_pane(source):
+    """右列预览；与 A/B 共用本地文件、页序和 source_spans。"""
+    payload = _load_pdf_preview(source)
+    page = payload["page"]
+    total = payload["total"]
+    page_label = str(page) if type(page) is int and page > 0 else "未知"
+    if type(total) is int and total > 0:
+        page_label += " / " + str(total)
+    title = _text(source.get("title")) if isinstance(source, dict) else ""
+    chunk_id = _text(source.get("chunk_id")) if isinstance(source, dict) else ""
+    header = st.columns([5, 1])
+    with header[0]:
+        st.markdown("**原 PDF**")
+    with header[1]:
+        st.button("关闭预览", key="close_pdf_preview", on_click=_close_pdf_preview)
+    st.caption((title + " · " if title else "")
+               + "PDF 文件页序 " + page_label + "（从 1 开始计数）"
+               + (" · " + chunk_id if chunk_id else ""))
+    if payload["error"]:
+        st.warning(payload["error"])
+        st.caption("引用原文仍保存在左侧来源卡片中；下方同时保留本轮引用文字。")
+        raw = _text(source.get("text")) if isinstance(source, dict) else ""
+        if raw:
+            with st.expander("查看引用原文", expanded=True):
+                st.text(raw)
+        return
+    PDF_PREVIEW_COMPONENT(
+        pdf_base64=payload["data"],
+        page=page,
+        total_pages=total,
+        title=title or "原 PDF",
+        chunk_id=chunk_id,
+        source_spans=(source.get("source_spans") if isinstance(source, dict)
+                      and isinstance(source.get("source_spans"), list) else []),
+        error=payload["error"],
+        key="pdf_preview_pane",
+        height=730,
+    )
+
+
+@st.dialog("原 PDF 预览", width="large", on_dismiss=_dismiss_pdf_preview)
+def _render_pdf_preview_dialog(source, *, request_token):
+    payload = _load_pdf_preview(source)
+    page = payload["page"]
+    total = payload["total"]
+    page_label = str(page) if type(page) is int and page > 0 else "未知"
+    if type(total) is int and total > 0:
+        page_label += " / " + str(total)
+    title = _text(source.get("title")) if isinstance(source, dict) else ""
+    chunk_id = _text(source.get("chunk_id")) if isinstance(source, dict) else ""
+    st.caption("PDF 文件页序 " + page_label + "（从 1 开始计数）"
+               + (" · " + chunk_id if chunk_id else ""))
+    if payload["error"]:
+        st.warning(payload["error"])
+        st.caption("引用原文仍保存在来源卡片中；下方同时保留本轮引用文字。")
+        raw = _text(source.get("text")) if isinstance(source, dict) else ""
+        if raw:
+            with st.expander("查看引用原文", expanded=True):
+                st.text(raw)
+        return
+    PDF_PREVIEW_COMPONENT(
+        pdf_base64=payload["data"],
+        page=page,
+        total_pages=total,
+        title=title or "原 PDF",
+        chunk_id=chunk_id,
+        source_spans=(source.get("source_spans") if isinstance(source, dict)
+                      and isinstance(source.get("source_spans"), list) else []),
+        error=payload["error"],
+        key=f"pdf_preview_{request_token}",
+        height=730,
+    )
+
+
+def _render_pdf_preview():
+    request = st.session_state.get(PDF_PREVIEW_REQUEST_KEY)
+    if not isinstance(request, dict):
+        return
+    token = request.get("token")
+    if type(token) is not int or token == st.session_state.get(PDF_PREVIEW_SHOWN_KEY):
+        return
+    st.session_state[PDF_PREVIEW_SHOWN_KEY] = token
+    source = request.get("source")
+    _render_pdf_preview_dialog(source if isinstance(source, dict) else {}, request_token=token)
+
+
+def _inline_ref_scope(key_prefix):
+    scope = re.sub(r"[^A-Za-z0-9_-]", "_", _text(key_prefix))[:80]
+    return scope or "answer"
+
+
+def _inline_ref_links(answer, key_prefix, lookup):
+    """只把本轮有 evidence_source 的 [ID:n] 变成带作用域的锚点。"""
+    citations = answer.get("citations") or []
+    by_ref = {}
+    for citation in citations:
+        if not isinstance(citation, dict):
+            continue
+        ref = citation.get("ref")
+        source = lookup.get(_text(citation.get("chunk_id")))
+        if type(ref) is int and ref >= 0 and isinstance(source, dict):
+            by_ref.setdefault(ref, source)
+    scope = _inline_ref_scope(key_prefix)
+    text = answer.get("text") if isinstance(answer.get("text"), str) else ""
+
+    def replace(match):
+        ref = int(match.group(1))
+        if ref not in by_ref:
+            return "[" + str(ref) + "]"
+        return f"[[{ref}]](#d8-ref-{scope}-{ref})"
+
+    return re.sub(r"\[ID:(\d+)\]", replace, text), by_ref, scope
+
+
+def _inline_preview_suffix():
+    request = st.session_state.get(PDF_PREVIEW_REQUEST_KEY)
+    token = request.get("token") if isinstance(request, dict) else None
+    return str(token) if type(token) is int else "0"
+
+
+def _mount_inline_refs(scope, by_ref, key_prefix):
+    if not by_ref:
+        return
+    rows = []
+    for ref in sorted(by_ref):
+        source = by_ref[ref]
+        rows.append({
+            "ref": ref,
+            "title": _text(source.get("title")) or "原论文",
+            "page": source.get("pdf_page") if type(source.get("pdf_page")) is int else None,
+            "text": _text(source.get("text")),
+            "available": _pdf_preview_issue(source) is None,
+        })
+    result = D8_INLINE_REFS(
+        data={"scope": scope, "sources": rows},
+        on_ref_click_change=lambda: None,
+        key=f"d8_inline_refs_{scope}_{_inline_preview_suffix()}",
+        height=0,
+    )
+    event = result.ref_click
+    if not isinstance(event, dict):
+        return
+    ref, nonce = event.get("ref"), event.get("nonce")
+    if type(ref) is not int:
+        return
+    handled = st.session_state.setdefault(D8_REF_HANDLED_KEY, {})
+    if nonce is None or handled.get(scope) == nonce:
+        return
+    handled[scope] = nonce
+    source = by_ref.get(ref)
+    if source is not None:
+        _request_pdf_preview(source)
+        st.rerun()
+
+
+def _show_source(source, number, *, shown=False, preview_key=None):
     """仅展示程序返回的定位与原文，不按模型描述重建来源。"""
     page = source.get("pdf_page")
     page_label = _number(page) if type(page) is int and page > 0 else "未知"
@@ -150,6 +414,13 @@ def _show_source(source, number, *, shown=False):
         st.caption(f"引用 {number} · PDF 文件页序 {page_label}（从 1 开始计数）")
         raw = source.get("shown_text") if shown else source.get("text")
         st.text(_text(raw))
+    if preview_key is not None:
+        issue = _pdf_preview_issue(source)
+        if issue:
+            st.caption("原 PDF 预览不可用：" + issue)
+        else:
+            st.button("在 PDF 中查看", key=preview_key,
+                      on_click=_request_pdf_preview, args=(source,))
     with st.expander("来源定位"):
         identity = _text(source.get("paper_id"))
         version = _text(source.get("arxiv_version"))
@@ -299,6 +570,9 @@ def _render_trajectory(report):
                 action = _mapping(step.get("parsed_action"))
                 names = [_text(_mapping(call.get("function")).get("name")) for call in step.get("tool_calls") or []]
                 st.text(label + "模型动作：" + (", ".join(names) if names else _text(action.get("action")) or "未完成"))
+                if step.get("error"):
+                    error = _mapping(step["error"])
+                    st.text(label + "本轮错误：" + (_text(error.get("code")) or "未记录"))
                 st.text(label + "剩余步数：" + _number(step.get("remaining_steps")))
                 if action.get("missing_information"):
                     st.text(label + "取证目标：" + _text(action.get("missing_information")))
@@ -308,6 +582,13 @@ def _render_trajectory(report):
                     if isinstance(version, dict):
                         st.text(label + "论文 / 解析版本：" + _text(version.get("paper_id"))
                                 + " / " + _text(version.get("parse_revision")))
+                for call in step.get("tool_calls") or []:
+                    observation = _mapping(call.get("tool_observation"))
+                    if not observation:
+                        continue
+                    name = _text(_mapping(call.get("function")).get("name")) or "工具"
+                    st.text(label + "工具观察（" + name + "）：")
+                    st.json(observation, expanded=False)
                 if step.get("tool_observation") is not None:
                     st.text(label + "工具观察：")
                     st.json(step["tool_observation"], expanded=False)
@@ -411,10 +692,15 @@ def render_report(report, *, key_prefix):
         lookup = {_text(source.get("chunk_id")): source for source in sources
                   if isinstance(source, dict)}
         if isinstance(answer.get("text"), str):
-            text = re.sub(r"\[ID:(\d+)\]", r"[\1]", answer["text"])
-            st.markdown(text)
             citations = answer.get("citations") or []
+            text, inline_refs, inline_scope = _inline_ref_links(answer, key_prefix, lookup)
+            st.markdown(text)
+            _mount_inline_refs(inline_scope, inline_refs, key_prefix)
             if citations:
+                preview_request = st.session_state.get(PDF_PREVIEW_REQUEST_KEY)
+                preview_token = (preview_request.get("token")
+                                 if isinstance(preview_request, dict) else None)
+                preview_suffix = str(preview_token) if type(preview_token) is int else "0"
                 unique = []
                 seen = set()
                 for citation in citations:
@@ -426,7 +712,8 @@ def render_report(report, *, key_prefix):
                         unique.append(citation)
                 with st.popover("引用来源（" + str(len(citations)) + " 处 / "
                                 + str(len(unique)) + " 个来源）", type="tertiary",
-                                width="content", key=f"prose_citations_{key_prefix}",
+                                width="content",
+                                key=f"prose_citations_{key_prefix}_{preview_suffix}",
                                 on_change="ignore"):
                     st.markdown("**正文引用**")
                     for number, citation in enumerate(unique, start=1):
@@ -436,7 +723,9 @@ def render_report(report, *, key_prefix):
                             continue
                         if number > 1:
                             st.divider()
-                        _show_source(source, citation.get("ref"))
+                        _show_source(source, citation.get("ref"),
+                                     preview_key="pdf_preview_" + key_prefix + "_"
+                                     + (_text(citation.get("chunk_id")) or _text(source.get("chunk_id"))))
             reason = _text(answer.get("reason"))
             if reason:
                 st.caption(reason)
@@ -529,6 +818,7 @@ def render_report(report, *, key_prefix):
 
 def _new_conversation():
     """开启所选论文的新对话，已有回答继续保留。"""
+    _clear_pdf_preview()
     st.session_state[CONVERSATION_KEY] = str(uuid.uuid4())
     st.session_state[CONVERSATION_VERSIONS_KEY] = frozenset(
         tuple(pair) for pair in st.session_state.get("selected_versions", []))
@@ -546,6 +836,7 @@ def _ensure_conversation():
 
 def _select_conversation():
     conversation_id = st.session_state["conversation_picker"]
+    _clear_pdf_preview()
     st.session_state[CONVERSATION_KEY] = conversation_id
     st.session_state.pop(REPORT_KEY, None)
     st.session_state.pop(NOTICE_KEY, None)
@@ -754,8 +1045,12 @@ def _render_import_controls():
 
 
 def main():
-    st.set_page_config(page_title="论文研究助手", page_icon="📚", layout="centered")
+    initial_preview = _active_pdf_preview()
+    st.set_page_config(page_title="论文研究助手", page_icon="📚",
+                       layout="wide" if initial_preview else "centered")
     st.html(CHAT_STYLE)
+    if initial_preview:
+        st.html(WIDE_CHAT_STYLE)
     _collect_paper_import()
     _collect_submission()
     pending = st.session_state.pop(PENDING_KEY, None)
@@ -799,43 +1094,60 @@ def main():
                 for paper_id, revision in selected:
                     st.text(paper_id + " / " + revision)
         st.divider()
-        st.markdown("**点击段末引用编号，即可查看原文。**")
+        st.markdown("**悬停正文引用看原文，点击卡片中的按钮打开右侧原 PDF。**")
         st.caption("模型知识和分析会单独标注。")
-        st.caption("同一组论文支持继续追问；切换论文或版本会开启新对话。发送问题会使用模型额度；查看引用和下载已有回答无需再次调用模型。")
-    st.html('<div class="chat-brand">论文研究助手</div>')
-    st.chat_input("向论文提问…", key="question", disabled=not options or _busy(),
-                  on_submit=_queue_submission)
-    if not options:
-        st.info("当前没有已入库的完整论文，请先导入论文。")
-    notice = st.session_state.get(NOTICE_KEY)
-    if isinstance(notice, str):
-        st.warning(notice)
-    records = st.session_state.get(SUBMISSIONS_KEY, {})
-    visible = [(token, record) for token, record in records.items()
-               if (record.get("conversation_id") or "legacy") == st.session_state[CONVERSATION_KEY]
-               and (isinstance(record.get("report"), dict) or record.get("status") in ("reserved", "runtime_error"))]
-    if not visible:
-        st.html('<div class="chat-welcome"><h1>今天想读懂什么？</h1>'
-                '<p>选择论文，提出问题。<br>点击段末引用编号，回到对应的原文。</p></div>')
-    loading_shown = False
-    for token, record in visible:
-        report = record.get("report")
-        query = (_text(report.get("user_question")) or _text(report.get("query"))) if isinstance(report, dict) else _text(record.get("query"))
-        with st.container(key="user_" + token):
-            with st.chat_message("user"):
-                st.markdown(query)
-        with st.container(key="reply_" + token):
-            with st.chat_message("assistant"):
-                if isinstance(report, dict):
-                    render_report(report, key_prefix=token)
-                elif record.get("status") == "reserved":
-                    loading_shown = True
-                    st.fragment(run_every=0.5)(_render_inflight)(True)
-                else:
-                    st.error("本次提交未取得完整报告，实际用量未知；请检查本机运行记录。")
-    if st.session_state.get(INFLIGHT_KEY) and not loading_shown:
-        st.caption("另一段对话正在生成回答，完成后可继续发送。")
-        st.fragment(run_every=0.5)(_render_inflight)(False)
+        st.caption("下方「引用来源」仍保留完整列表；同一组论文支持继续追问，切换论文或版本会开启新对话。")
+    preview_request = _active_pdf_preview()
+    if initial_preview is not None and preview_request is None:
+        st.rerun()
+
+    def render_chat():
+        st.html('<div class="chat-brand">论文研究助手</div>')
+        st.chat_input("向论文提问…", key="question", disabled=not options or _busy(),
+                      on_submit=_queue_submission)
+        if not options:
+            st.info("当前没有已入库的完整论文，请先导入论文。")
+        notice = st.session_state.get(NOTICE_KEY)
+        if isinstance(notice, str):
+            st.warning(notice)
+        records = st.session_state.get(SUBMISSIONS_KEY, {})
+        visible = [(token, record) for token, record in records.items()
+                   if (record.get("conversation_id") or "legacy") == st.session_state[CONVERSATION_KEY]
+                   and (isinstance(record.get("report"), dict)
+                        or record.get("status") in ("reserved", "runtime_error"))]
+        if not visible:
+            st.html('<div class="chat-welcome"><h1>今天想读懂什么？</h1>'
+                    '<p>选择论文，提出问题。<br>悬停正文引用看原文，点击卡片按钮打开原 PDF。</p></div>')
+        loading_shown = False
+        for token, record in visible:
+            report = record.get("report")
+            query = ((_text(report.get("user_question")) or _text(report.get("query")))
+                     if isinstance(report, dict) else _text(record.get("query")))
+            with st.container(key="user_" + token):
+                with st.chat_message("user"):
+                    st.markdown(query)
+            with st.container(key="reply_" + token):
+                with st.chat_message("assistant"):
+                    if isinstance(report, dict):
+                        render_report(report, key_prefix=token)
+                    elif record.get("status") == "reserved":
+                        loading_shown = True
+                        st.fragment(run_every=0.5)(_render_inflight)(True)
+                    else:
+                        st.error("本次提交未取得完整报告，实际用量未知；请检查本机运行记录。")
+        if st.session_state.get(INFLIGHT_KEY) and not loading_shown:
+            st.caption("另一段对话正在生成回答，完成后可继续发送。")
+            st.fragment(run_every=0.5)(_render_inflight)(False)
+
+    if preview_request is not None:
+        left, right = st.columns([1, 1.25], gap="large")
+        with left:
+            render_chat()
+        with right:
+            with st.container(key="pdf_preview_pane_wrap"):
+                _render_pdf_preview_pane(preview_request["source"])
+    else:
+        render_chat()
 
 
 if __name__ == "__main__":

@@ -389,8 +389,10 @@ def build_messages(question: str, context: dict, *, conversation_context=None) -
                    or type(row["rank"]) is not int or row["rank"] < 1
                    or row["reason"] not in ("duplicate", "character_budget", "token_budget", "after_budget_stop") for row in omitted)):
         _fail("invalid_selection_record")
+    full_request = context.get("context_capacity_mode") == "full_request"
     expected_empty = None if shown else ("no_hits" if count == 0 else
-                                        "token_budget" if context.get("max_tokens") is not None else "character_budget")
+                                        "token_budget" if (context.get("max_tokens") is not None or full_request)
+                                        else "character_budget")
     if context.get("empty_selection_reason") != expected_empty:
         _fail("invalid_selection_record")
     if [row["rank"] for row in shown] != sorted(row["rank"] for row in shown):

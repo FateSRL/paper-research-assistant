@@ -3,6 +3,9 @@ from copy import deepcopy
 from math import isfinite
 
 
+FINALIZE_RESERVE_SECONDS = 20.0
+
+
 class DeadlineExceeded(ValueError):
     code = "deadline_exceeded"
 

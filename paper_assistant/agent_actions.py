@@ -279,7 +279,7 @@ class ReadContextAction(_StrictAction):
 
 def read_context_tool_definition():
     return {"type": "function", "function": {"name": "read_context",
-        "description": "Read saved originals locally: either parent_id from the reading directory, or one chunk_id seen in actual tool returns or visible evidence with missing_information stating the needed fact. A chunk read fetches only that target, without neighbors. No network search.",
+        "description": "Read saved originals locally. parent_id must come from the displayed reading directory and reads the children saved under that parent; a body parent may cover only part of a section, not the whole section. A table listed in the directory can be read directly by its parent without first searching for a child. chunk_id reads only one known candidate or visible chunk, without neighbors, and requires missing_information stating the needed fact. Directory entries and candidate locations are not citable originals; only originals actually shown in the current context are citable. No network search.",
         "parameters": ReadContextAction.model_json_schema()}}
 
 

@@ -13,6 +13,7 @@ from unittest.mock import patch
 import httpx
 from paper_assistant import config, d9_runtime as runtime
 from paper_assistant.answer_export import atomic_text, exclusive_json
+from paper_assistant.evidence_reading import _table_caption
 from paper_assistant.llm_client import ChatBudget
 from paper_assistant.hybrid_search import HybridEvidenceSearcher
 from paper_assistant.config import RerankSettings
@@ -91,6 +92,8 @@ class RuntimeChecks(unittest.TestCase):
         def resources(*args):
             if resource_error:
                 raise resource_error
+            if mode == "agent" and hasattr(self.store, "enable_thread_sharing"):
+                self.store.enable_thread_sharing()
             try:
                 yield self.store, (HybridEvidenceSearcher(self.searcher, self.store, self.reranker) if hybrid else self.searcher)
             finally:
@@ -305,16 +308,33 @@ class RuntimeChecks(unittest.TestCase):
         search = {"query": f.question, "selected_versions": [{"paper_id": p, "parse_revision": r} for p, r in f.pairs],
                   "missing_information": "Read the selected paper evidence."}
 
+        from paper_assistant import agent_graph as graph_module
+        from paper_assistant.langchain_model import RecordedChatModel
         with patch.object(runtime.web_runtime, "_ready_versions", return_value=[{
                 **search["selected_versions"][0], "title": "Offline structural fixture"}]):
-            stable = self.invoke("agent", token="stable-two-searches", library_mode=True, query="Explain both selected passages.",
-                search_outcomes=[f.search([f.abstract_id])["results"],
-                                 f.search([f.body_id, f.abstract_id])["results"]], outcomes=[
-                    response({"clarification_question": None, "planned_queries": []}),
-                    check_agent.tool_response(search),
-                    check_agent.tool_response({**search, "query": "Read another requested detail"}),
-                    response("The original detail is supported. [ID:2]")])
+            with patch.object(RecordedChatModel, "_generate", autospec=True,
+                              side_effect=RecordedChatModel._generate) as model_generate:
+                with patch.object(graph_module, "run_evidence_graph",
+                                  wraps=graph_module.run_evidence_graph) as run_graph:
+                    with patch.object(graph_module, "build_agent_tools",
+                                      wraps=graph_module.build_agent_tools) as build_tools:
+                        stable = self.invoke("agent", token="stable-two-searches", library_mode=True, query="Explain both selected passages.",
+                            search_outcomes=[f.search([f.abstract_id])["results"],
+                                             f.search([f.body_id, f.abstract_id])["results"]], outcomes=[
+                                response({"clarification_question": None, "planned_queries": []}),
+                                check_agent.tool_response(search),
+                                check_agent.tool_response({**search, "query": "Read another requested detail"}),
+                                response("The original detail is supported. [ID:2]")])
+        self.assertTrue(build_tools.called)
+        self.assertTrue(run_graph.called)
+        self.assertTrue(model_generate.called)
         self.assertEqual(stable["status"], "answered", [(step.get("parse_error_code"), step.get("response")) for step in stable["result"]["action_steps"]])
+        self.assertEqual(stable["result"]["tool_protocol"], "langchain-core-1.7.3")
+        self.assertEqual(stable["result"]["tool_state_version"], "agent-evidence-state-v1")
+        self.assertEqual(stable["result"]["loop_version"], "d4-create-agent-evidence-v1")
+        self.assertEqual(stable["result"]["graph_version"], "d4-create-agent-evidence-v1")
+        self.assertEqual(stable["result"]["model_protocol"], "langchain-core-1.7.3/BaseChatModel")
+        self.assertEqual(stable["result"]["model_adapter_version"], "recorded-chat-model-v1")
         self.assertEqual(stable["chat_statistics"]["repairs"], 0)
         self.assertEqual({row["chunk_id"]: row["ref"] for row in stable["result"]["evidence_registry"]},
                          {f.abstract_id: 1, f.body_id: 2})
@@ -393,7 +413,7 @@ class RuntimeChecks(unittest.TestCase):
         # process narration nor an old action envelope can become recovered prose.
         corrected = run_case("react-multiple-corrections", [
             native("not_available", {}, "I will continue looking."),
-            native("search", {"wrong": "field"}), native("read_context", {"chunk_id": "unknown"}),
+            native("search", {"wrong": "field"}), native("read_context", {"chunk_id": "unknown", "missing_information": "the needed fact"}),
             native("search", search), response("Unknown handle. [ID:99]"),
             response("Unknown again. 【ID：99】"),
             response({"action": "prepare_answer", "facts": [], "answerable": True, "missing_information": ""}),
@@ -404,12 +424,64 @@ class RuntimeChecks(unittest.TestCase):
         self.assertEqual(corrected["answer"]["text"], "Correct final. [ID:1] Book [99] [1,2].")
         self.assertEqual(len(corrected["answer"]["citations"]), 1)
         self.assertTrue(any(step.get("purpose") == "repair" for step in corrected["result"]["action_steps"]))
+        failed_read = next(call for step in corrected["result"]["action_steps"]
+                           for call in step.get("tool_calls") or []
+                           if call["function"]["name"] == "read_context")
+        self.assertEqual(failed_read["tool_observation"]["status"], "tool_error")
+        self.assertEqual(failed_read["tool_observation"]["error"]["code"], "unavailable_chunk")
+        self.assertIn("不在当前已知候选", failed_read["tool_observation"]["message"])
+        self.assertIn("不表示论文没有报告", failed_read["tool_observation"]["message"])
+        self.assertIn(failed_read["tool_observation"]["message"],
+                      json.dumps(json.loads(self.requests[-1].content)["messages"], ensure_ascii=False))
         self.assertIsNone(corrected["result"]["recovery"])
         self.assertIsNone(corrected["result"]["synthesis"])
         for invalid in ("",):
             empty = run_case("react-empty", [response(invalid), response("A complete evidence-gap explanation.")])
-            self.assertEqual(empty["status"], "answered")
+            self.assertEqual(empty["status"], "answered", empty.get("error"))
             self.assertEqual(empty["chat_statistics"]["repairs"], 1)
+
+        # D7: an obvious fragment gets one no-tool synthesis; if that is also
+        # incomplete, the delivery is invalid_output, not an endless repair loop.
+        fragment = run_case("react-incomplete-fragment", [response("The"),
+            response("A complete evidence-gap explanation.")])
+        self.assertEqual(fragment["status"], "answered", fragment.get("error"))
+        self.assertEqual(fragment["result"]["final_text_check"]["status"], "valid")
+        self.assertEqual(fragment["result"]["synthesis"]["trigger"], "incomplete_text")
+        self.assertEqual(fragment["result"]["synthesis"]["status"], "completed")
+        self.assertEqual(fragment["llm_requests"], 3)
+        self.assertNotIn("The", fragment["answer"]["text"])
+        fragment_invalid = run_case("react-incomplete-fragment-invalid", [response("The"),
+            response("The authors")])
+        self.assertEqual(fragment_invalid["status"], "invalid_output")
+        self.assertEqual(fragment_invalid["result"]["final_text_check"]["status"], "incomplete_text")
+        self.assertEqual(fragment_invalid["result"]["synthesis"]["status"], "invalid_output")
+        self.assertEqual(fragment_invalid["llm_requests"], 3)
+        self.assertIsNone(fragment_invalid["answer"])
+        short = run_case("react-complete-short", [response("No.")])
+        self.assertEqual(short["status"], "answered", short.get("error"))
+        self.assertEqual(short["answer"]["text"], "No.")
+        deadline = run_case("react-deadline-reserve", [native("search", search),
+            response("A complete deadline synthesis.")],
+            on_search=lambda _: self.clock.advance(101))
+        self.assertEqual(deadline["status"], "answered", deadline.get("error"))
+        self.assertEqual(deadline["result"]["autonomous_steps_used"], 1)
+        self.assertEqual(deadline["result"]["synthesis"]["trigger"], "deadline_reserve")
+        self.assertEqual(deadline["result"]["synthesis"]["status"], "completed")
+        self.assertEqual(deadline["stop_reason"], "deadline_reserve_synthesized")
+        self.assertEqual(deadline["llm_requests"], 3)
+        expired = run_case("react-deadline-expired", [native("search", search)],
+            on_search=lambda _: self.clock.advance(121))
+        self.assertEqual(expired["status"], "budget_exceeded")
+        self.assertEqual(expired["result"]["error"]["code"], "deadline_exceeded")
+        self.assertEqual(expired["llm_requests"], 2)
+        self.assertIsNone(expired["answer"])
+        limited = run_case("react-small-limit", [native("search", search),
+            response("A complete limit synthesis. [ID:1]")], iterations=1)
+        self.assertEqual(limited["status"], "answered", limited.get("error"))
+        self.assertTrue(limited["result"]["limit_finalize"])
+        self.assertEqual(limited["result"]["synthesis"]["trigger"], "iteration_limit")
+        self.assertEqual(limited["stop_reason"], "iteration_limit_synthesized")
+        self.assertEqual(limited["result"]["autonomous_steps_used"], 1)
 
         for case, final in (("ok", "Supported at the explicit limit. [ID:1]"), ("invalid", "Unknown. [ID:99]")):
             limited = run_case("react-limit-" + case, [native("search", search), response(final)], iterations=1)
@@ -423,7 +495,7 @@ class RuntimeChecks(unittest.TestCase):
             if case == "ok":
                 self.assertEqual(limited["result"]["final_prompt_version"], PROSE_FINAL_PROMPT_VERSION)
 
-        with patch("paper_assistant.agent.validate_prose_citations", side_effect=RuntimeError("offline synthesis failure")):
+        with patch("paper_assistant.agent_graph.validate_prose_citations", side_effect=RuntimeError("offline synthesis failure")):
             synthesis_failed = run_case("react-single-synthesis-failure", [native("search", search),
                 response("A candidate final answer. [ID:1]")], iterations=1)
         self.assertEqual(synthesis_failed["status"], "tool_error")
@@ -440,6 +512,67 @@ class RuntimeChecks(unittest.TestCase):
         self.assertEqual(js["llm_requests"], 4)
         self.assertIn('"stdout": "2"', json.dumps(js["result"]["action_steps"], ensure_ascii=False))
 
+        # The original argument object reaches the existing JS parser, so an
+        # extra field is rejected rather than silently dropped before parsing.
+        js_extra = run_case("react-native-js-extra", [native("search", search),
+            native("run_javascript", {"code": "console.log(3)", "extra": True}),
+            response("The calculated value is 3. [ID:1]")])
+        self.assertEqual(js_extra["status"], "answered", js_extra.get("error"))
+        self.assertEqual(js_extra["result"]["javascript_calls"], [])
+        self.assertIn('"status": "invalid_arguments"',
+                      json.dumps(js_extra["result"]["action_steps"], ensure_ascii=False))
+        self.assertIn('"code": "invalid_action_schema"',
+                      json.dumps(js_extra["result"]["action_steps"], ensure_ascii=False))
+
+        # A malformed call must not cause a valid call in the same batch to be
+        # skipped. Both original ids return exactly once before the next turn.
+        mixed = run_case("react-mixed-valid-invalid", [
+            check_agent.tool_response(search, "{not json"),
+            response("The valid search evidence is available. [ID:1]")])
+        self.assertEqual(mixed["status"], "answered", mixed.get("error"))
+        self.assertEqual(mixed["embedding_requests"], 1)
+        mixed_step = next(step for step in mixed["result"]["action_steps"]
+                          if len(step.get("tool_calls") or []) == 2)
+        self.assertEqual([call["function"]["name"] for call in mixed_step["tool_calls"]],
+                         ["search", "search"])
+        self.assertEqual([call["tool_observation"]["status"] for call in mixed_step["tool_calls"]],
+                         ["success", "invalid_arguments"])
+        final_messages = json.loads(self.requests[-1].content)["messages"]
+        assistant = next(message for message in final_messages
+                         if message.get("role") == "assistant" and len(message.get("tool_calls") or []) == 2)
+        self.assertEqual([call["id"] for call in assistant["tool_calls"]], ["call-0", "call-1"])
+        self.assertEqual(assistant["tool_calls"][1]["function"]["arguments"], "{not json")
+        tool_messages = [message for message in final_messages if message.get("role") == "tool"]
+        self.assertEqual([message["tool_call_id"] for message in tool_messages], ["call-0", "call-1"])
+        self.assertIn('"status": "invalid_arguments"', tool_messages[1]["content"])
+        self.assertEqual(mixed["answer"]["citations"][0]["chunk_id"], f.abstract_id)
+
+        # An invalid whole response must not execute its otherwise parseable
+        # calls, but each original call id still gets one error result.
+        truncated = check_agent.tool_response(search)[1]
+        truncated["choices"][0]["finish_reason"] = "length"
+        truncated_run = run_case("react-truncated-tool-call", [
+            (200, truncated),
+            response("The truncated turn was corrected without executing its tool call.")])
+        self.assertEqual(truncated_run["status"], "answered", truncated_run.get("error"))
+        self.assertEqual(truncated_run["embedding_requests"], 0)
+        failed_truncated = next(step for step in truncated_run["result"]["action_steps"]
+                                if step.get("tool_calls"))
+        self.assertEqual(failed_truncated["response"]["status"], "invalid_output")
+        self.assertEqual(failed_truncated["response"]["output_issue"], "truncated")
+        self.assertEqual(failed_truncated["parse_error_code"], "truncated")
+        self.assertEqual([(call["function"]["name"], call["tool_observation"]["error"]["code"])
+                          for call in failed_truncated["tool_calls"]],
+                         [("search", "truncated")])
+        next_messages = json.loads(self.requests[-1].content)["messages"]
+        assistant = next(message for message in next_messages
+                         if message.get("role") == "assistant" and message.get("tool_calls"))
+        self.assertEqual(assistant["tool_calls"][0]["function"]["arguments"],
+                         json.dumps(search, ensure_ascii=False))
+        tool_result = next(message for message in next_messages if message.get("role") == "tool")
+        self.assertEqual(tool_result["tool_call_id"], "call-0")
+        self.assertIn('"code": "truncated"', tool_result["content"])
+
         # An exhausted transient logical invoke gets one no-tool synthesis;
         # authentication failures are not sent through that fallback.
         from scripts.check_llm import http_error
@@ -449,10 +582,23 @@ class RuntimeChecks(unittest.TestCase):
         self.assertEqual(network["result"]["stop_reason"], "error_synthesized")
         self.assertEqual(network["chat_statistics"]["network_retries"], 1)
         self.assertEqual(network["chat_attempts"][-1]["purpose"], "synthesis")
+        failed = [step for step in network["result"]["action_steps"] if step.get("error")]
+        self.assertEqual(len(failed), 1)
+        self.assertIsNone(failed[0]["response"])
+        self.assertEqual(failed[0]["error"]["attempts"][0]["http_status"], 503)
+        self.assertEqual(len(failed[0]["sdk_attempt_numbers"]), 2)
+        self.assertEqual(failed[0]["sdk_attempt_numbers"],
+                         [row["number"] for row in network["chat_attempts"][2:4]])
+        self.assertEqual(network["llm_requests"], 5)
         denied = run_case("react-auth-stop", [http_error(401)])
         self.assertEqual(denied["status"], "tool_error")
         self.assertEqual(denied["llm_requests"], 2)
         self.assertIsNone(denied["result"]["synthesis"])
+        failed = [step for step in denied["result"]["action_steps"] if step.get("error")]
+        self.assertEqual(len(failed), 1)
+        self.assertIsNone(failed[0]["response"])
+        self.assertEqual(failed[0]["error"]["attempts"][0]["http_status"], 401)
+        self.assertEqual(failed[0]["sdk_attempt_numbers"], [2])
 
         # Already validated prose survives cleanup failure with its bound source
         # snapshot, without another invoke or an invented historical answer.
@@ -535,7 +681,7 @@ class RuntimeChecks(unittest.TestCase):
                   "section_path": ["Method", "Recovered mechanism"], "content_type": "body",
                   "source_spans": parent_spans}
         table_parent_id = f"{paper_id}_{revision}_parent2"
-        table_caption = "Table 2: Recovered measurements"
+        table_caption = "Table 2: Recovered measurements (p < 0.05; n <= 100)"
         table_rows = ["<tr><td></td><td>Prec</td><td>Rec</td><td>F1</td></tr>",
                       "<tr><td>BERT</td><td>0.91</td><td>0.92</td><td>0.93</td></tr>"]
         table_children, table_parent_spans, table_offset = [], [], 0
@@ -596,7 +742,7 @@ class RuntimeChecks(unittest.TestCase):
                     tool["choices"][0]["message"]["tool_calls"][0]["function"] = {
                         "name": "read_context", "arguments": json.dumps({"parent_id": parent_id})}
                     outcomes.append((200, tool))
-                if mode == "agent":
+                    outcomes.append((200, deepcopy(tool)))
                     outcomes.append(response("The recovered mechanism continues across both pages. [ID:10]"))
                 else:
                     outcomes.append(response(action["answer"]))
@@ -612,14 +758,15 @@ class RuntimeChecks(unittest.TestCase):
                 else:
                     self.assertEqual(r["answer"]["direct_answer"], action["answer"]["direct_answer"])
                 self.assertEqual(r["embedding_requests"], 0 if mode == "agent" else 1)
-                self.assertEqual(r["llm_requests"], 2 if mode == "fixed_rag" else 3)
-                self.assertEqual(self.store.get_parent.call_count, 1)
+                self.assertEqual(r["llm_requests"], 2 if mode == "fixed_rag" else 4)
+                self.assertEqual(self.store.get_parent.call_count, 1 if mode == "fixed_rag" else 2)
                 self.assertTrue(self.store._closed and self.searcher.closed and self.chat_client._closed)
                 context = r["result"]["context"]
                 if mode == "fixed_rag":
-                    self.assertEqual(context["max_tokens"], 8192)
-                    self.assertEqual(context["tokenizer"], "Qwen3-Embedding-0.6B")
-                    self.assertLessEqual(context["shown_tokens"], 8192)
+                    self.assertEqual(context["context_capacity_mode"], "full_request")
+                    self.assertIsNone(context["max_chars"])
+                    self.assertNotIn("max_tokens", context)
+                    self.assertIn("request_fit", r["result"]["generation"])
                 else:
                     self.assertIsNone(context["max_chars"])
                     self.assertNotIn("max_tokens", context)
@@ -631,9 +778,10 @@ class RuntimeChecks(unittest.TestCase):
                     self.assertEqual([row["chunk_id"] for row in r["result"]["search"]["results"]], [child_ids[0], child_ids[2]])
                 else:
                     self.assertIsNone(r["result"]["search"])
+                    self.assertEqual(len(r["result"]["context_reads"]), 2)
                     self.assertEqual(r["result"]["context_reads"][0]["shown_ids"], child_ids)
                     self.assertEqual(r["rerank_requests"], 0)
-                    self.assertEqual(r["result"]["evidence_calls_used"], 1)
+                    self.assertEqual(r["result"]["evidence_calls_used"], 2)
                 self.assertEqual({row["pdf_page"] for row in context["shown_evidence"]}, {1, 2})
                 origins = context["reading_origins"]
                 self.assertEqual(len(origins), 10 if mode == "agent" else 8)
@@ -656,13 +804,32 @@ class RuntimeChecks(unittest.TestCase):
                 self.assertEqual(evidence["reading_origins"][0]["parent_id"], parent_id)
                 if mode == "agent":
                     final_messages = json.loads(self.requests[-1].content)["messages"]
-                    final_input = json.loads(final_messages[-1]["content"])
+                    final_input = json.loads(next(message for message in reversed(final_messages)
+                                                  if message["role"] == "user")["content"])
                     actual_input = final_input
                     self.assertEqual(final_input["allowed_refs"], list(range(1, 11)))
                     self.assertEqual([row["ref"] for section in final_input["evidence_sections"]
                                       for row in section["chunks"]], list(range(1, 11)))
                     self.assertNotIn("prepared_answer", final_input)
                     self.assertNotIn("allowed_actions", final_input)
+                    reads = r["result"]["context_reads"]
+                    self.assertEqual(len(reads), 2)
+                    repeat = reads[1]
+                    self.assertEqual(repeat["status"], "no_new_shown_evidence")
+                    self.assertEqual(repeat["returned_ids"], child_ids)
+                    self.assertEqual(repeat["shown_ids"], child_ids)
+                    self.assertEqual(repeat["new_shown_ids"], [])
+                    self.assertEqual([row["ref"] for row in repeat["shown_refs"]],
+                                     list(range(1, 11)))
+                    self.assertIn("已在当前上下文中", repeat["message"])
+                    self.assertIn("本次只覆盖该 parent", repeat["message"])
+                    tool_payloads = [json.loads(message["content"])
+                                     for message in final_messages if message["role"] == "tool"]
+                    self.assertEqual(len(tool_payloads), 2)
+                    self.assertEqual([row["new_shown_ids"] for row in tool_payloads],
+                                     [child_ids, []])
+                    self.assertEqual(tool_payloads[-1]["message"], repeat["message"])
+                    self.assertEqual(tool_payloads[-1]["returned_ids"], child_ids)
                     self.assertFalse(any(step.get("phase") == "prepared_final_decision"
                                          for step in r["result"]["action_steps"]))
                 else:
@@ -676,7 +843,12 @@ class RuntimeChecks(unittest.TestCase):
                     self.assertEqual(actual_input["evidence_sections"][0]["section_path"], parent["section_path"])
                     self.assertNotIn("context_budget", actual_input)
                 else:
-                    self.assertEqual(actual_input["context_budget"]["max_tokens"], 8192)
+                    self.assertNotIn("context_budget", actual_input)
+                    self.assertEqual(actual_input["allowed_citation_ids"], context["allowed_citation_ids"])
+                    self.assertEqual([row["chunk_id"] for row in actual_input["shown_evidence"]],
+                                     context["allowed_citation_ids"])
+                    self.assertTrue(r["result"]["request_capacity"]["input_budget_tokens"] > 8000)
+                    self.assertEqual(r["result"]["request_capacity"]["trimmed_chunk_ids"], [])
                 json_bytes, markdown_bytes = runtime.download_payloads(r, project_root=self.root)
                 downloaded = json.loads(json_bytes)
                 if mode == "agent":
@@ -741,6 +913,10 @@ class RuntimeChecks(unittest.TestCase):
             table_entry = next(entry for entry in directory if entry["parent_id"] == table_parent_id)
             self.assertEqual(table_entry["content_type"], "table")
             self.assertEqual(table_entry["caption"], table_caption)
+            self.assertIn("p < 0.05", table_entry["caption"])
+            self.assertIn("n <= 100", table_entry["caption"])
+            self.assertIn(table_caption, json.dumps(decision_payload, ensure_ascii=False))
+            self.assertEqual(_table_caption({"text": "<tr><td>0.93</td></tr>"}), "")
             self.assertEqual(table_entry["pdf_pages"], [2])
             self.assertEqual(table_entry["section_path"], ["Results", "Recovered measurements"])
             self.assertNotIn(table_rows[-1], json.dumps(decision_payload, ensure_ascii=False))
@@ -763,12 +939,43 @@ class RuntimeChecks(unittest.TestCase):
             self.assertEqual([row["chunk_id"] for section in final_input["evidence_sections"]
                               for row in section["chunks"]][-1], table_children[-1]["chunk_id"])
             self.assertNotIn("allowed_actions", final_input)
+            self.assertIn("本次读取取得并展示了该 parent 保存的子块", reads[0]["message"])
+            self.assertIn("本次只覆盖该 parent", reads[0]["message"])
+            self.assertIn("不代表同章节其他正文或表格已读取", reads[0]["message"])
+            table_tool_payloads = [json.loads(message["content"]) for message in final_messages
+                                   if message["role"] == "tool"]
+            self.assertEqual(table_tool_payloads[-1]["message"], reads[0]["message"])
             self.assertEqual(text_count(final_messages, table_children[-1]["text"]), 1)
             self.assertEqual(r["answer"]["text"], "BERT reported detection F1 0.93. [ID:2]")
             self.assertEqual(r["answer"]["citations"][0]["chunk_id"], table_children[-1]["chunk_id"])
             self.assertEqual(r["answer"]["evidence_refs"][0]["chunk_id"], table_children[-1]["chunk_id"])
             self.assertEqual(r["answer"]["evidence_sources"][0]["text"], table_children[-1]["text"])
             self.assertTrue(r["answer"]["evidence_sources"][0]["reading_origins"][0]["parent_id"] == table_parent_id)
+
+        # A bounded read window can leave a saved parent's children unshown.
+        # The observation must describe that partial state rather than call it
+        # already provided or claim the paper did not report the material.
+        from paper_assistant.agent_state import AgentEvidenceState
+        parent_store = unittest.mock.Mock()
+        parent_store.get_parent.return_value = deepcopy(parent)
+        limited_state = AgentEvidenceState(
+            query=question, pairs=pairs, store=parent_store,
+            version_chunks={(paper_id, revision): [*children, *table_children]},
+            paper_information=[], source_registry=None, requirement=None,
+            source_issue=None, top_k=5, max_chars=300, context_options={"max_tokens": 5},
+            conversation_context=None, result={"context_reads": []},
+            evidence_registry=EvidenceRegistry(), search_fn=lambda *args, **kwargs: None,
+            set_stage=lambda *args: None, deadline=lambda: None)
+        limited_state.accessible_parents.add(parent_id)
+        limited_state.merge_current()
+        limited_read = json.loads(limited_state.invoke_read({"parent_id": parent_id}))
+        self.assertEqual(limited_read["status"], "no_new_shown_evidence")
+        self.assertEqual(limited_read["shown_ids"], [])
+        self.assertEqual(limited_read["new_shown_ids"], [])
+        self.assertEqual(limited_read["not_shown_ids"], child_ids)
+        self.assertIn("未在当前上下文中展示", limited_read["message"])
+        self.assertIn("不能据此认为全部正文已提供", limited_read["message"])
+        self.assertNotIn("已在当前上下文中", limited_read["message"])
 
         # Real 8192-token selection omits a returned target. The only new
         # operation is a local anchored read; no wider retrieval or paid client.
@@ -1609,7 +1816,10 @@ class RuntimeChecks(unittest.TestCase):
                     self.assertEqual(r["embedding_requests"], 1)
                     self.assertEqual(r["policy"]["max_tokens"], 4096)
                     self.assertIsNone(r["policy"]["max_attempts"])
-                    self.assertIsNone(r["policy"]["total_timeout"])
+                    if mode == "agent":
+                        self.assertEqual(r["policy"]["total_timeout"], 120.0)
+                    else:
+                        self.assertIsNone(r["policy"]["total_timeout"])
                     self.assertEqual(r["configuration"]["policy"], r["policy"])
                 history = [{"turn": 1, "status": "answered", "user_question": f.question,
                             "standalone_question": f.question,
@@ -1628,9 +1838,10 @@ class RuntimeChecks(unittest.TestCase):
 
                 # Preparation, network retry and short repair exceed the old three-request default.
                 decisions = ([page_search(prepared["standalone_question"])] if mode == "agent" else [])
+                late_seconds = 121 if mode == "fixed_rag" else 1
                 r = self.invoke(mode, token=mode + "-library-fourth-request", library_mode=True, pairs=pairs,
                     query="Explain that original passage.", rows=[], conversation_history=history,
-                    on_search=lambda _: self.clock.advance(121), outcomes=[response(prepared),
+                    on_search=lambda _: self.clock.advance(late_seconds), outcomes=[response(prepared),
                         *decisions,
                         check_agent.http_error(500), (200, check_agent.completion('{"unfinished":', finish_reason="length")),
                         response(draft["answer"] if mode == "fixed_rag" else draft)])
@@ -1638,8 +1849,12 @@ class RuntimeChecks(unittest.TestCase):
                 self.assertEqual(r["llm_requests"], 5 if mode == "agent" else 4)
                 self.assertEqual(r["chat_statistics"]["network_retries"], 1)
                 self.assertEqual(r["chat_statistics"]["repairs"], 1)
-                self.assertGreater(r["chat_statistics"]["elapsed_seconds"], 120)
-                self.assertFalse(r["business_commit"]["deadline_checked"])
+                if mode == "fixed_rag":
+                    self.assertGreater(r["chat_statistics"]["elapsed_seconds"], 120)
+                    self.assertFalse(r["business_commit"]["deadline_checked"])
+                else:
+                    self.assertGreater(r["chat_statistics"]["elapsed_seconds"], 0)
+                    self.assertTrue(r["business_commit"]["deadline_checked"])
                 self.assertTrue(all(record["timeout_seconds"] == 30 for record in self.budget.records))
                 self.assertEqual(r["answer"]["evidence_sources"][0]["chunk_id"], abstract_id)
                 self.assertTrue(all(json.loads(request.content)["max_tokens"] == 4096 for request in self.requests))

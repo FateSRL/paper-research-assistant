@@ -255,10 +255,14 @@ class LLMChecks(unittest.TestCase):
                 self.assertEqual(error.attempts[0]["http_status"], status)
 
     def test_retryable_http_error_retries_once_and_preserves_both_attempts(self):
+        from paper_assistant.langchain_model import (
+            RecordedChatModel, recorded_response, to_langchain_messages,
+        )
         for status in [408, 409, 429, 500, 503]:
             with self.subTest(status=status):
                 client, requests = self.client(http_error(status), (200, completion()))
-                result = client.invoke(self.messages)
+                model = RecordedChatModel(client)
+                result = recorded_response(model.invoke(to_langchain_messages(self.messages)))
                 self.assertEqual(result["status"], "success")
                 self.assert_counts(result, requests, 2)
                 self.assertEqual(result["statistics"]["network_retries"], 1)
@@ -266,14 +270,42 @@ class LLMChecks(unittest.TestCase):
                 self.assertEqual(result["attempts"][0]["http_status"], status)
                 self.assertTrue(result["attempts"][1]["is_network_retry"])
 
+        from paper_assistant.agent_actions import search_tool_definition
+        calls = [{"id": f"call-{i}", "type": "function", "function": {"name": "search", "arguments": "{}"}}
+                 for i in range(2)]
+        body = completion(None, finish_reason="tool_calls")
+        body["choices"][0]["message"]["tool_calls"] = calls
+        client, requests = self.client((200, body), (200, completion()))
+        model = RecordedChatModel(client)
+        tools = [search_tool_definition()]
+        message = model.bind_tools(tools, tool_choice="auto").invoke(
+            to_langchain_messages(self.messages))
+        first = recorded_response(message)
+        self.assertEqual(first["status"], "success")
+        self.assertIsNone(first["content"])
+        self.assertEqual(first["tool_calls"], calls)
+        self.assertEqual([call["name"] for call in message.tool_calls], ["search", "search"])
+        self.assertEqual(json.loads(requests[0].content)["tools"], tools)
+        self.assertEqual(json.loads(requests[0].content)["tool_choice"], "auto")
+        messages = [*self.messages, {"role": "assistant", "content": None, "tool_calls": calls},
+                    *[{"role": "tool", "tool_call_id": c["id"], "content": "no_hits"} for c in calls]]
+        result = recorded_response(model.invoke(to_langchain_messages(messages)))
+        self.assertEqual(json.loads(requests[1].content)["messages"], messages)
+        self.assertNotIn("tools", json.loads(requests[1].content))
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["statistics"]["total_tokens"], 50)
+        self.assert_counts(result, requests, 2)
+
         from dataclasses import replace
         from paper_assistant.d9_runtime import INTERACTIVE_AGENT_POLICY
         self.settings = replace(self.settings, timeout=300.0)
         budget = ChatBudget(INTERACTIVE_AGENT_POLICY, clock=self.clock)
         client, requests = self.client(http_error(503), (200, completion()),
                                        http_error(429), (200, completion()), budget=budget)
-        first = client.invoke(self.messages)
-        second = client.invoke(self.messages, purpose="synthesis", request_timeout=90.0)
+        model = RecordedChatModel(client)
+        first = recorded_response(model.invoke(to_langchain_messages(self.messages)))
+        second = recorded_response(model.invoke(to_langchain_messages(self.messages),
+            purpose="synthesis", request_timeout=90.0))
         self.assertEqual(len(requests), 4)
         self.assertEqual(budget.network_retries, 2)
         self.assertEqual([r["is_network_retry"] for r in budget.records], [False, True, False, True])
@@ -289,19 +321,21 @@ class LLMChecks(unittest.TestCase):
         budget = ChatBudget(INTERACTIVE_AGENT_POLICY, clock=self.clock)
         client, requests = self.client(http_error(500), http_error(503),
             http_error(500), (200, completion()), budget=budget)
+        model = RecordedChatModel(client)
         with self.assertRaises(LLMCallError) as caught:
-            client.invoke(self.messages)
+            model.invoke(to_langchain_messages(self.messages))
         self.assertEqual(len(requests), 2)  # no third hidden send in this invoke
         self.assertEqual(len(caught.exception.attempts), 2)
-        result = client.invoke(self.messages, purpose="repair")
+        result = recorded_response(model.invoke(to_langchain_messages(self.messages), purpose="repair"))
         self.assertEqual(len(requests), 4)
         self.assertEqual(result["statistics"]["network_retries"], 2)
         self.assertEqual(result["statistics"]["repairs"], 1)
         self.assertEqual(result["status"], "success")
         self.assertEqual(ChatPolicy(max_attempts=8, max_repairs=7).max_attempts, 8)
         client, requests = self.client(http_error(401), policy=INTERACTIVE_AGENT_POLICY)
+        model = RecordedChatModel(client)
         with self.assertRaises(LLMCallError):
-            client.invoke(self.messages)
+            model.invoke(to_langchain_messages(self.messages))
         self.assertEqual(len(requests), 1)
 
     def test_second_retryable_failure_stops_without_sdk_hidden_retry(self):
@@ -527,6 +561,64 @@ class LLMChecks(unittest.TestCase):
         self.assertEqual(cls.call_args.kwargs["max_tokens"], 128)
         cls.return_value.invoke.assert_called_once_with(self.messages)
 
+
+    def test_real_local_blocking_request_is_cancelled_at_budget_deadline(self):
+        """HTTPX/SDK timeout stops a genuinely blocked local request; no Future."""
+        import threading
+        import time
+        from dataclasses import replace
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        received = []
+
+        class SlowHandler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", "0"))
+                self.rfile.read(length)
+                received.append(time.monotonic())
+                time.sleep(2.0)
+                body = json.dumps(completion("late local response")).encode("utf-8")
+                try:
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+
+            def log_message(self, *_):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), SlowHandler)
+        server.daemon_threads = True
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        settings = replace(self.settings, timeout=3.0,
+            base_url=f"http://127.0.0.1:{server.server_address[1]}/v1")
+        policy = ChatPolicy(max_tokens=16, request_timeout=0.6, total_timeout=0.6,
+                            max_attempts=1, max_network_retries=0)
+        client = RecordedLLM(settings, policy=policy)
+        self.addCleanup(client.close)
+        # Client construction is local setup, not part of the measured call.
+        budget = ChatBudget(policy)
+        client.budget, client.clock = budget, budget.clock
+        started = time.monotonic()
+        with self.assertRaises(LLMCallError) as caught:
+            client.invoke(self.messages)
+        elapsed = time.monotonic() - started
+        self.assertEqual(caught.exception.status, "budget_exceeded")
+        self.assertEqual(caught.exception.code, "deadline_exceeded")
+        self.assertEqual(len(received), 1)
+        self.assertEqual(len(budget.records), 1)
+        self.assertEqual(budget.records[0]["error_code"], "request_timeout")
+        self.assertEqual(budget.records[0]["timeout_seconds"], 0.6)
+        self.assertEqual(budget.records[0]["http_request_attempts"], 1)
+        self.assertLess(elapsed, 1.8)
+        self.assertGreaterEqual(elapsed, 0.5)
+        self.assertLessEqual(budget.remaining_seconds(), 0)
 
 def main():
     program = unittest.main(module=__name__, exit=False)

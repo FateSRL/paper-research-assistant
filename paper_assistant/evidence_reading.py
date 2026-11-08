@@ -38,7 +38,7 @@ def parent_children(parent_id, version_chunks, parent_store, *, parent=None):
 def _table_caption(parent):
     """Return the saved leading table title, or empty when it is not a caption."""
     first = (parent.get("text") or "").split("\n", 1)[0].strip()
-    return first if first and "<" not in first and _TABLE_CAPTION.match(first) else ""
+    return first if first and _TABLE_CAPTION.match(first) else ""
 
 
 def reading_directory(store, pairs):
@@ -85,10 +85,12 @@ def retain_explicit_context(context, rows, *, source_registry=None, target_ids=(
 
 def read_evidence_context(context, version_chunks, *, max_chunks=5,
                           source_registry=None, source_requirement=None, anchors_first=False,
-                          store=None):
+                          store=None, full_request_mode=False):
     """Keep anchors, then read saved parent children within the shared budget.
 
     Legacy chunks retain the existing small adjacent-chunk reading window.
+    ``full_request_mode`` keeps the same saved-parent read even when the
+    registry deliberately returns no explicit token window.
     """
     anchors = [{**row, "text": row["shown_text"]} for row in context["shown_evidence"]]
     if not anchors:
@@ -98,7 +100,7 @@ def read_evidence_context(context, version_chunks, *, max_chunks=5,
     pairs = [(v["paper_id"], v["parse_revision"]) for v in context["selected_versions"]]
     abstract_only = source_requirement is not None and source_requirement["required_scope"] == "abstract"
     options = token_context_options(registry=source_registry, context=context, candidates=anchors)
-    structured = bool(options)
+    structured = bool(options) or (full_request_mode and any(row.get("parent_id") for row in anchors))
     parent_store = source_registry if source_registry is not None else store
     read_parents = set()
 

@@ -867,6 +867,75 @@ class GenerationChecks(unittest.TestCase):
         self.assertIn('"status":"answered"', first["messages"][0]["content"])
         self.assert_counts(result, requests, 2, repairs=1)
 
+        # The library full-request path keeps a large original that the legacy
+        # 8192-token evidence window could not deliver, and its whole-request
+        # fitter also counts a repair tail rather than only the first user turn.
+        from dataclasses import replace
+        from paper_assistant.context import prepare_context
+        from paper_assistant.generation import fit_fixed_request
+        from paper_assistant.message_fit import context_fit_budget, count_request_tokens
+
+        huge = "Full original evidence remains available. " * 5000
+        full_search = {"status": "success", "query": "What is the full original evidence?",
+                       "selected_versions": [{"paper_id": "p1", "parse_revision": "r1"}],
+                       "results": [evidence("full-1", text=huge)], "returned_count": 1,
+                       "top_k": 5, "index_profile_id": "offline-profile", "statistics": {}}
+        full_context = prepare_context(full_search, max_chars=None)
+        full_context["context_capacity_mode"] = "full_request"
+        previous_settings = self.settings
+        self.settings = replace(self.settings, context_length=1048576)
+        full_client, full_requests = self.client(
+            (200, completion(encoded(answered(["full-1"])))),
+            policy=ChatPolicy(max_tokens=4096, max_attempts=None, total_timeout=None))
+        full_result = generate_draft(full_context, full_client)
+        self.assertEqual(full_result["status"], "draft_valid")
+        sent = json.loads(full_requests[0].content)["messages"][1]["content"]
+        self.assertEqual(json.loads(sent)["shown_evidence"][0]["shown_text"], huge)
+        self.assertEqual(full_result["request_fit"]["model_context_length"], 1048576)
+        self.assertEqual(full_result["request_fit"]["trimmed_chunk_ids"], [])
+        self.assertLessEqual(count_request_tokens(full_result["generation_attempts"][0]["messages"]),
+                             context_fit_budget(1048576, 4096))
+        self.settings = previous_settings
+
+        # An explicit old 8192-token window cannot fit the same first chunk; a
+        # later repair tail is counted too and is fitted by dropping whole
+        # low-priority chunks from the end, with permissions updated together.
+        old_client = type("OfflineCapacityClient", (), {
+            "settings": replace(self.settings, context_length=8192),
+            "policy": ChatPolicy(max_tokens=4096, max_attempts=None, total_timeout=None)})()
+        old_context = deepcopy(full_context)
+        old_messages = json.loads(full_requests[0].content)["messages"]
+        old_fitted, old_fit = fit_fixed_request(old_context, old_messages, old_client)
+        self.assertEqual(old_fit["trimmed_chunk_ids"], ["full-1"])
+        self.assertEqual(old_context["allowed_citation_ids"], [])
+        self.assertNotIn("Full original evidence remains available.", encoded(old_fitted))
+
+        repair_rows = [evidence("r-" + str(index), text=("repair evidence " + str(index) + " ") * 40,
+                                rank=index) for index in range(1, 5)]
+        repair_context = prepare_context({**full_search, "query": "Repair with the full request.",
+                                          "results": repair_rows, "returned_count": 4}, max_chars=None)
+        repair_context["context_capacity_mode"] = "full_request"
+        repair_base = build_messages(repair_context["question"], repair_context)
+        repair_messages = [*repair_base,
+                           {"role": "assistant", "content": "x" * 12000},
+                           {"role": "user", "content": json.dumps({"action": "repair_citations",
+                            "instruction": "Use only the shown evidence."})}]
+        fitted, fit = fit_fixed_request(repair_context, repair_messages, old_client,
+                                        conversation_context=None)
+        self.assertLessEqual(count_request_tokens(fitted),
+                             context_fit_budget(8192, 4096))
+        self.assertTrue(fit["trimmed_chunk_ids"])
+        self.assertEqual(fitted[-2:], repair_messages[-2:])
+        self.assertEqual(repair_context["allowed_citation_ids"],
+                         [row["chunk_id"] for row in repair_context["shown_evidence"]])
+        self.assertEqual(repair_context["candidate_count"],
+                         len(repair_context["shown_evidence"]) + len(repair_context["omitted_evidence"]))
+        self.assertEqual(set(fit["trimmed_chunk_ids"]),
+                         {row["chunk_id"] for row in repair_context["omitted_evidence"]})
+        with self.assertRaises(ContextError):
+            build_messages(repair_context["question"], {**repair_context,
+                           "allowed_citation_ids": [row["chunk_id"] for row in repair_rows]})
+
     def test_empty_nonjson_and_truncated_response_trigger_one_repair(self):
         cases = [(None, "stop"), ("not json", "stop"), ('{"status":"answered","claims":[', "length")]
         for content, finish in cases:

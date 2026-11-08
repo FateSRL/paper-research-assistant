@@ -8,6 +8,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from paper_assistant import agent_runtime as legacy
+from paper_assistant.langchain_agent import GRAPH_VERSION
 from paper_assistant import web_runtime
 from paper_assistant.agent import answer_question_agent
 from paper_assistant.agent_export import _identifier, render_agent_run, save_agent_run
@@ -27,10 +28,11 @@ CONTRACT_PATH = "artifacts/d9/agent_config.json"
 REGISTRY_PATH = "artifacts/d9/source_regions.json"
 SCHEMA_VERSION = "d9-runtime-policy-v1"
 RUNTIME_VERSION = "d9-native-tool-loop-runtime-v2"
+FULL_REQUEST_CAPACITY_VERSION = "d14-fixed-full-request-capacity-v1"
 MODES = ("fixed_rag", "agent")
 INTERACTIVE_CHAT_POLICY = ChatPolicy(max_tokens=4096, max_attempts=None, total_timeout=None)
 INTERACTIVE_AGENT_POLICY = ChatPolicy(max_tokens=4096, request_timeout=300.0,
-    max_attempts=None, total_timeout=None, max_repairs=None, retry_per_invoke=True)
+    max_attempts=None, total_timeout=120.0, max_repairs=None, retry_per_invoke=True)
 STATUSES = ("answered", "insufficient_evidence", "tool_error", "invalid_output", "budget_exceeded", "needs_clarification")
 InvalidQuestion = legacy.InvalidQuestion
 load_current_profile = legacy.load_current_profile
@@ -88,7 +90,7 @@ def list_ready_versions(*, project_root=ROOT):
 
 def _failure(report, status, code, stage):
     result = report["result"]
-    if (result.get("loop_version") == "react-native-tools-v1" and result.get("status") == "answered"
+    if (result.get("loop_version") in ("react-native-tools-v1", GRAPH_VERSION) and result.get("status") == "answered"
             and isinstance((result.get("answer") or {}).get("text"), str)):
         result["recovery"] = {"kind": "validated_final", "trigger": code, "stage": stage, "model_requests": 0}
         result["interrupted_failure"] = {"status": status, "code": code, "stage": stage}
@@ -114,6 +116,7 @@ def run_question(query, selected_versions, *, mode="fixed_rag", project_root=ROO
         raise InvalidQuestion("提交标识不合法") from None
     root = Path(project_root).resolve()
     react = library_mode and mode == "agent"
+    full_fixed = library_mode and mode == "fixed_rag"
     policy = INTERACTIVE_AGENT_POLICY if react else INTERACTIVE_CHAT_POLICY if library_mode else ChatPolicy()
     budget = ChatBudget(policy)
     now = datetime.now(timezone.utc)
@@ -123,6 +126,8 @@ def run_question(query, selected_versions, *, mode="fixed_rag", project_root=ROO
         "conversation_id": conversation_id, "conversation_history": deepcopy(conversation_history or []),
         "user_question": query, "standalone_question": None if conversation_history or library_mode else query,
         "started_at_utc": now.isoformat(), "finished_at_utc": None, "runtime_version": RUNTIME_VERSION,
+        "fixed_context_capacity": ({"mode": "full_request", "policy_version": FULL_REQUEST_CAPACITY_VERSION}
+                                   if full_fixed else {"mode": "explicit", "policy_version": None}),
         "policy": asdict(policy), "configuration": None, "index_profile": None, "strategy_binding": None,
         "registry_binding": None, "selected_version_metadata": [],
         "semantic_support_status": "not_reviewed", "is_answer_accuracy": False,
@@ -162,8 +167,10 @@ def run_question(query, selected_versions, *, mode="fixed_rag", project_root=ROO
             policy = replace(INTERACTIVE_AGENT_POLICY, request_timeout=chat.timeout)
             budget.policy = policy
             report.update(policy=asdict(policy), agent_max_iterations=iterations, synthesis_timeout=90.0,
-                deadline_enforcement="per_request_timeout_and_per_invoke_network_retry; native_tool_loop_limit",
-                budget_implementation_version="react-iteration-and-invoke-retry-v1")
+                question_budget_seconds=policy.total_timeout,
+                finalize_reserve_seconds=20.0,
+                deadline_enforcement="shared_question_deadline_with_httpx_timeouts; finalization_reserve_20s; native_tool_loop_limit",
+                budget_implementation_version="d7-question-deadline-and-finalization-v1")
         profile = load_current_profile(root)
         report["configuration"] = (legacy.public_configuration(embedding, chat, profile, policy) if library_mode else
                                    validate_configuration(strategy, embedding, chat, profile, policy))
@@ -172,6 +179,8 @@ def run_question(query, selected_versions, *, mode="fixed_rag", project_root=ROO
         stage = "resources"
         with ExitStack() as resources:
             store, searcher = resources.enter_context(open_retrieval_resources(root, embedding, profile))
+            if react and hasattr(store, "enable_thread_sharing"):
+                store.enable_thread_sharing()
             if library_mode:
                 ready = {(row["paper_id"], row["parse_revision"]): row
                          for row in web_runtime._ready_versions(store, profile)}
@@ -179,7 +188,10 @@ def run_question(query, selected_versions, *, mode="fixed_rag", project_root=ROO
                     raise InvalidQuestion("所选论文与解析版本在当前索引下尚未完整入库")
                 report["selected_version_metadata"] = [deepcopy(ready[pair]) for pair in pairs]
             registry = load_registry(root, pairs, store=store)
-            report["registry_binding"] = {"path": REGISTRY_PATH}
+            if full_fixed:
+                registry.full_context_mode = True
+            report["registry_binding"] = {"path": REGISTRY_PATH,
+                                          "full_context_mode": bool(registry.full_context_mode)}
             remaining(budget.remaining_seconds)
             client = resources.enter_context(RecordedLLM(chat, policy=policy, budget=budget))
             stage = "conversation_preparation"
@@ -200,6 +212,8 @@ def run_question(query, selected_versions, *, mode="fixed_rag", project_root=ROO
             conversation_kwargs = {"conversation_context": conversation} if library_mode or report["conversation_history"] or answer_instructions else {}
             if library_mode and mode == "agent":
                 conversation_kwargs["autonomous_steps"] = iterations
+            if full_fixed:
+                conversation_kwargs["use_model_context"] = True
             report["result"] = deepcopy(core(conversation["standalone_question"], pairs, searcher, store, client,
                 project_root=root, top_k=top_k, max_chars=max_chars, source_registry=registry,
                 enforce_remaining_budget=True, **conversation_kwargs))

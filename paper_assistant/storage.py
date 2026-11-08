@@ -15,6 +15,7 @@ from math import isfinite
 from pathlib import Path
 import re
 import sqlite3
+import threading
 
 from paper_assistant.schemas import EvidenceRef
 
@@ -392,6 +393,21 @@ def _version_columns(bundle: StoredVersionInput, manifest: dict) -> dict:
     }
 
 
+class _LockedReadConnection:
+    """Serialize the graph's read-only connection across worker threads."""
+
+    def __init__(self, connection, lock):
+        self._connection = connection
+        self._lock = lock
+
+    def execute(self, *args, **kwargs):
+        with self._lock:
+            return self._connection.execute(*args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._connection, name)
+
+
 class PaperStore:
     """一条 SQLite 连接；用 with 让正常退出和异常退出都明确关闭文件。
 
@@ -406,6 +422,8 @@ class PaperStore:
         self.database_path = Path(database_path).resolve()
         self.read_only = read_only
         self._closed = True
+        self._thread_sharing = False
+        self._thread_lock = None
         if read_only and not self.database_path.is_file():
             raise StorageError(f"只读数据库不存在：{self.database_path}")
         try:
@@ -443,6 +461,23 @@ class PaperStore:
                 self.connection.rollback()
             self.connection.close()
             self._closed = True
+
+    def enable_thread_sharing(self) -> None:
+        """Allow this read-only connection to be used serially by graph workers."""
+        if not self.read_only:
+            raise StorageError("只有只读连接可以启用跨线程读取")
+        if self._thread_sharing:
+            return
+        self._ensure_open()
+        self.connection.close()
+        self.connection = sqlite3.connect(
+            self.database_path.as_uri() + "?mode=ro", uri=True,
+            timeout=30, isolation_level=None, check_same_thread=False)
+        self.connection.row_factory = sqlite3.Row
+        self.connection.execute("PRAGMA foreign_keys = ON")
+        self._thread_lock = threading.RLock()
+        self.connection = _LockedReadConnection(self.connection, self._thread_lock)
+        self._thread_sharing = True
 
     def _ensure_open(self) -> None:
         if self._closed:
